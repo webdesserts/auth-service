@@ -51,6 +51,10 @@ struct Cli {
     #[arg(long, env = "AUTH_PUBLIC_URL")]
     public_url: Option<String>,
 
+    /// Path prefix for URLs (e.g., "/auth" when mounted behind reverse proxy)
+    #[arg(long, default_value = "", env = "AUTH_PATH_PREFIX")]
+    path_prefix: String,
+
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -66,6 +70,7 @@ pub struct AppState {
     pub config: Config,
     pub storage: Storage,
     pub public_url: String,
+    pub path_prefix: String,
     pub webauthn: Webauthn,
 }
 
@@ -120,6 +125,7 @@ async fn main() -> anyhow::Result<()> {
         config,
         storage,
         public_url: public_url.clone(),
+        path_prefix: cli.path_prefix,
         webauthn,
     });
 

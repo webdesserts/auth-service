@@ -20,10 +20,10 @@ use super::html;
 pub async fn get_setup(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     // If users exist, redirect to "already setup" page
     if state.storage.has_any_users() {
-        return Html(html::already_setup_page());
+        return Html(html::already_setup_page(&state.path_prefix));
     }
 
-    Html(html::setup_page())
+    Html(html::setup_page(&state.path_prefix))
 }
 
 #[derive(Debug, Deserialize)]

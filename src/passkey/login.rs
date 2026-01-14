@@ -34,16 +34,16 @@ pub async fn get_login(
 ) -> impl IntoResponse {
     // If no users exist, redirect to setup
     if !state.storage.has_any_users() {
-        return Html(html::redirect_page("/setup"));
+        return Html(html::redirect_page(&format!("{}/setup", state.path_prefix)));
     }
 
     // Determine the return URL
     let return_to = query
         .pending
-        .map(|p| format!("/authorize?pending={}", p))
+        .map(|p| format!("{}/authorize?pending={}", state.path_prefix, p))
         .or(query.return_to);
 
-    Html(html::login_page(return_to.as_deref()))
+    Html(html::login_page(&state.path_prefix, return_to.as_deref()))
 }
 
 #[derive(Debug, Serialize)]

@@ -1,7 +1,7 @@
 //! Inline HTML templates for passkey setup and login pages
 
 /// Setup page for first-user passkey registration
-pub fn setup_page() -> String {
+pub fn setup_page(path_prefix: &str) -> String {
     format!(
         r#"<!DOCTYPE html>
 <html lang="en">
@@ -33,12 +33,12 @@ pub fn setup_page() -> String {
 </body>
 </html>"#,
         CSS_STYLES,
-        setup_js()
+        setup_js(path_prefix)
     )
 }
 
 /// "Already setup" page shown when a user already exists
-pub fn already_setup_page() -> String {
+pub fn already_setup_page(path_prefix: &str) -> String {
     format!(
         r#"<!DOCTYPE html>
 <html lang="en">
@@ -46,23 +46,24 @@ pub fn already_setup_page() -> String {
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Already Configured - Obsidian Memory</title>
-    <style>{}</style>
+    <style>{css}</style>
 </head>
 <body>
     <div class="container">
         <h1>Already Configured</h1>
         <p>A passkey has already been registered for this server.</p>
         <p>If you need to reset, use: <code>docker exec auth-service auth-service reset</code></p>
-        <a href="/login" class="button">Go to Login</a>
+        <a href="{prefix}/login" class="button">Go to Login</a>
     </div>
 </body>
 </html>"#,
-        CSS_STYLES
+        css = CSS_STYLES,
+        prefix = path_prefix
     )
 }
 
 /// Login page for passkey authentication
-pub fn login_page(return_to: Option<&str>) -> String {
+pub fn login_page(path_prefix: &str, return_to: Option<&str>) -> String {
     let return_input = return_to
         .map(|r| format!(r#"<input type="hidden" id="return_to" value="{}">"#, html_escape(r)))
         .unwrap_or_default();
@@ -74,7 +75,7 @@ pub fn login_page(return_to: Option<&str>) -> String {
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Login - Obsidian Memory</title>
-    <style>{}</style>
+    <style>{css}</style>
 </head>
 <body>
     <div class="container">
@@ -82,7 +83,7 @@ pub fn login_page(return_to: Option<&str>) -> String {
         <p>Authenticate with your passkey to continue.</p>
 
         <form id="login-form">
-            {}
+            {return_input}
             <button type="submit" id="submit-btn">Login with Passkey</button>
         </form>
 
@@ -90,13 +91,13 @@ pub fn login_page(return_to: Option<&str>) -> String {
     </div>
 
     <script>
-    {}
+    {js}
     </script>
 </body>
 </html>"#,
-        CSS_STYLES,
-        return_input,
-        login_js()
+        css = CSS_STYLES,
+        return_input = return_input,
+        js = login_js(path_prefix)
     )
 }
 
@@ -238,38 +239,40 @@ code {
 }
 "#;
 
-fn setup_js() -> &'static str {
-    r#"
+fn setup_js(path_prefix: &str) -> String {
+    format!(
+        r#"
+const PATH_PREFIX = '{prefix}';
 const form = document.getElementById('setup-form');
 const status = document.getElementById('status');
 const submitBtn = document.getElementById('submit-btn');
 
-function showStatus(message, type) {
+function showStatus(message, type) {{
     status.textContent = message;
     status.className = 'status ' + type;
-}
+}}
 
-function base64UrlEncode(buffer) {
+function base64UrlEncode(buffer) {{
     const bytes = new Uint8Array(buffer);
     let str = '';
-    for (let i = 0; i < bytes.length; i++) {
+    for (let i = 0; i < bytes.length; i++) {{
         str += String.fromCharCode(bytes[i]);
-    }
+    }}
     return btoa(str).replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
-}
+}}
 
-function base64UrlDecode(str) {
+function base64UrlDecode(str) {{
     str = str.replace(/-/g, '+').replace(/_/g, '/');
     while (str.length % 4) str += '=';
     const binary = atob(str);
     const bytes = new Uint8Array(binary.length);
-    for (let i = 0; i < binary.length; i++) {
+    for (let i = 0; i < binary.length; i++) {{
         bytes[i] = binary.charCodeAt(i);
-    }
+    }}
     return bytes.buffer;
-}
+}}
 
-form.addEventListener('submit', async (e) => {
+form.addEventListener('submit', async (e) => {{
     e.preventDefault();
 
     const username = document.getElementById('username').value;
@@ -277,30 +280,30 @@ form.addEventListener('submit', async (e) => {
     submitBtn.disabled = true;
     showStatus('Starting registration...', 'info');
 
-    try {
+    try {{
         // Start registration
-        const startRes = await fetch('/setup/register/start', {
+        const startRes = await fetch(PATH_PREFIX + '/setup/register/start', {{
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ username })
-        });
+            headers: {{ 'Content-Type': 'application/json' }},
+            body: JSON.stringify({{ username }})
+        }});
 
-        if (!startRes.ok) {
+        if (!startRes.ok) {{
             const err = await startRes.text();
             throw new Error(err);
-        }
+        }}
 
-        const { challenge_id, options } = await startRes.json();
+        const {{ challenge_id, options }} = await startRes.json();
 
         // Decode challenge and user.id for WebAuthn
         options.publicKey.challenge = base64UrlDecode(options.publicKey.challenge);
         options.publicKey.user.id = base64UrlDecode(options.publicKey.user.id);
-        if (options.publicKey.excludeCredentials) {
-            options.publicKey.excludeCredentials = options.publicKey.excludeCredentials.map(c => ({
+        if (options.publicKey.excludeCredentials) {{
+            options.publicKey.excludeCredentials = options.publicKey.excludeCredentials.map(c => ({{
                 ...c,
                 id: base64UrlDecode(c.id)
-            }));
-        }
+            }}));
+        }}
 
         showStatus('Touch your security key or use biometrics...', 'info');
 
@@ -308,102 +311,106 @@ form.addEventListener('submit', async (e) => {
         const credential = await navigator.credentials.create(options);
 
         // Encode response for server
-        const response = {
+        const response = {{
             id: credential.id,
             rawId: base64UrlEncode(credential.rawId),
             type: credential.type,
-            response: {
+            response: {{
                 attestationObject: base64UrlEncode(credential.response.attestationObject),
                 clientDataJSON: base64UrlEncode(credential.response.clientDataJSON)
-            }
-        };
+            }}
+        }};
 
         showStatus('Verifying credential...', 'info');
 
         // Finish registration
-        const finishRes = await fetch('/setup/register/finish', {
+        const finishRes = await fetch(PATH_PREFIX + '/setup/register/finish', {{
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ challenge_id, credential: response })
-        });
+            headers: {{ 'Content-Type': 'application/json' }},
+            body: JSON.stringify({{ challenge_id, credential: response }})
+        }});
 
-        if (!finishRes.ok) {
+        if (!finishRes.ok) {{
             const err = await finishRes.text();
             throw new Error(err);
-        }
+        }}
 
         showStatus('Passkey registered successfully! Redirecting...', 'success');
-        setTimeout(() => window.location.href = '/login', 1500);
+        setTimeout(() => window.location.href = PATH_PREFIX + '/login', 1500);
 
-    } catch (err) {
+    }} catch (err) {{
         console.error('Registration error:', err);
         showStatus('Error: ' + err.message, 'error');
         submitBtn.disabled = false;
-    }
-});
-"#
+    }}
+}});
+"#,
+        prefix = path_prefix
+    )
 }
 
-fn login_js() -> &'static str {
-    r#"
+fn login_js(path_prefix: &str) -> String {
+    format!(
+        r#"
+const PATH_PREFIX = '{prefix}';
 const form = document.getElementById('login-form');
 const status = document.getElementById('status');
 const submitBtn = document.getElementById('submit-btn');
 const returnToEl = document.getElementById('return_to');
 
-function showStatus(message, type) {
+function showStatus(message, type) {{
     status.textContent = message;
     status.className = 'status ' + type;
-}
+}}
 
-function base64UrlEncode(buffer) {
+function base64UrlEncode(buffer) {{
     const bytes = new Uint8Array(buffer);
     let str = '';
-    for (let i = 0; i < bytes.length; i++) {
+    for (let i = 0; i < bytes.length; i++) {{
         str += String.fromCharCode(bytes[i]);
-    }
+    }}
     return btoa(str).replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
-}
+}}
 
-function base64UrlDecode(str) {
+function base64UrlDecode(str) {{
     str = str.replace(/-/g, '+').replace(/_/g, '/');
     while (str.length % 4) str += '=';
     const binary = atob(str);
     const bytes = new Uint8Array(binary.length);
-    for (let i = 0; i < binary.length; i++) {
+    for (let i = 0; i < binary.length; i++) {{
         bytes[i] = binary.charCodeAt(i);
-    }
+    }}
     return bytes.buffer;
-}
+}}
 
-form.addEventListener('submit', async (e) => {
+form.addEventListener('submit', async (e) => {{
     e.preventDefault();
 
     submitBtn.disabled = true;
     showStatus('Starting authentication...', 'info');
 
-    try {
+    try {{
         // Start authentication
-        const startRes = await fetch('/login/auth/start', {
+        const startRes = await fetch(PATH_PREFIX + '/login/auth/start', {{
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' }
-        });
+            headers: {{ 'Content-Type': 'application/json' }}
+        }});
 
-        if (!startRes.ok) {
+        if (!startRes.ok) {{
             const err = await startRes.text();
             throw new Error(err);
-        }
+        }}
 
-        const { challenge_id, options } = await startRes.json();
+        const {{ challenge_id, options }} = await startRes.json();
 
         // Decode challenge for WebAuthn
         options.publicKey.challenge = base64UrlDecode(options.publicKey.challenge);
-        if (options.publicKey.allowCredentials) {
-            options.publicKey.allowCredentials = options.publicKey.allowCredentials.map(c => ({
+        if (options.publicKey.allowCredentials) {{
+            options.publicKey.allowCredentials = options.publicKey.allowCredentials.map(c => ({{
                 ...c,
                 id: base64UrlDecode(c.id)
-            }));
-        }
+            }}));
+        }}
 
         showStatus('Touch your security key or use biometrics...', 'info');
 
@@ -411,32 +418,32 @@ form.addEventListener('submit', async (e) => {
         const credential = await navigator.credentials.get(options);
 
         // Encode response for server
-        const response = {
+        const response = {{
             id: credential.id,
             rawId: base64UrlEncode(credential.rawId),
             type: credential.type,
-            response: {
+            response: {{
                 authenticatorData: base64UrlEncode(credential.response.authenticatorData),
                 clientDataJSON: base64UrlEncode(credential.response.clientDataJSON),
                 signature: base64UrlEncode(credential.response.signature),
                 userHandle: credential.response.userHandle ? base64UrlEncode(credential.response.userHandle) : null
-            }
-        };
+            }}
+        }};
 
         showStatus('Verifying...', 'info');
 
         // Finish authentication
         const returnTo = returnToEl ? returnToEl.value : null;
-        const finishRes = await fetch('/login/auth/finish', {
+        const finishRes = await fetch(PATH_PREFIX + '/login/auth/finish', {{
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ challenge_id, credential: response, return_to: returnTo })
-        });
+            headers: {{ 'Content-Type': 'application/json' }},
+            body: JSON.stringify({{ challenge_id, credential: response, return_to: returnTo }})
+        }});
 
-        if (!finishRes.ok) {
+        if (!finishRes.ok) {{
             const err = await finishRes.text();
             throw new Error(err);
-        }
+        }}
 
         const result = await finishRes.json();
         showStatus('Login successful! Redirecting...', 'success');
@@ -444,11 +451,13 @@ form.addEventListener('submit', async (e) => {
         // Redirect to return_to or default
         window.location.href = result.redirect_to || '/';
 
-    } catch (err) {
+    }} catch (err) {{
         console.error('Authentication error:', err);
         showStatus('Error: ' + err.message, 'error');
         submitBtn.disabled = false;
-    }
-});
-"#
+    }}
+}});
+"#,
+        prefix = path_prefix
+    )
 }

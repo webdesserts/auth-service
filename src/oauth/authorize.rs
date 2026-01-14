@@ -151,7 +151,7 @@ pub async fn get_handler(
             state.storage.store_pending_oauth(pending_id.clone(), oauth_params);
 
             tracing::info!("No session - redirecting to login");
-            return Redirect::to(&format!("/login?pending={}", pending_id)).into_response();
+            return Redirect::to(&format!("{}/login?pending={}", state.path_prefix, pending_id)).into_response();
         }
     };
 
