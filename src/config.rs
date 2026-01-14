@@ -131,8 +131,10 @@ fn default_refresh_token_lifetime() -> u64 {
 
 fn default_allowed_redirects() -> HashSet<String> {
     let mut set = HashSet::new();
-    // Claude iOS MCP OAuth callback
+    // Claude MCP OAuth callbacks
     set.insert("https://claude.ai/api/mcp/auth_callback".to_string());
+    set.insert("https://claude.ai/callback".to_string());
+    set.insert("https://claude.com/callback".to_string());
     set
 }
 
