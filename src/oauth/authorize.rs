@@ -1,7 +1,7 @@
 //! OAuth 2.1 Authorization Endpoint
 //!
 //! Handles authorization requests with PKCE support.
-//! For now, this auto-approves requests (passkey auth is Phase 2).
+//! Requires passkey authentication before issuing auth codes.
 
 use std::sync::Arc;
 
@@ -13,26 +13,32 @@ use axum::{
 use chrono::{Duration, Utc};
 use serde::Deserialize;
 
-use crate::storage::{generate_random_string, hash_token, StoredAuthCode};
+use crate::passkey::validate_session_from_headers;
+use crate::storage::{generate_random_string, hash_token, PendingOAuthRequest, StoredAuthCode};
 use crate::AppState;
 
 /// Authorization request parameters
 #[derive(Debug, Deserialize)]
 pub struct AuthorizeRequest {
     /// Must be "code" for authorization code flow
-    pub response_type: String,
+    #[serde(default)]
+    pub response_type: Option<String>,
 
     /// The client identifier
-    pub client_id: String,
+    #[serde(default)]
+    pub client_id: Option<String>,
 
     /// Redirect URI (must match registered URI)
-    pub redirect_uri: String,
+    #[serde(default)]
+    pub redirect_uri: Option<String>,
 
     /// PKCE code challenge
-    pub code_challenge: String,
+    #[serde(default)]
+    pub code_challenge: Option<String>,
 
     /// PKCE code challenge method (must be "S256")
-    pub code_challenge_method: String,
+    #[serde(default)]
+    pub code_challenge_method: Option<String>,
 
     /// Client state (passed through to redirect)
     #[serde(default)]
@@ -42,6 +48,10 @@ pub struct AuthorizeRequest {
     #[serde(default)]
     #[allow(dead_code)]
     pub scope: Option<String>,
+
+    /// Pending OAuth request ID (when returning from login)
+    #[serde(default)]
+    pub pending: Option<String>,
 }
 
 /// Authorization error response
@@ -53,31 +63,108 @@ fn auth_error_redirect(redirect_uri: &str, error: &str, description: &str, state
     Redirect::to(&url)
 }
 
-/// Handler for `GET /authorize` - shows consent page (simplified for now)
+/// Handler for `GET /authorize`
 pub async fn get_handler(
     State(state): State<Arc<AppState>>,
+    headers: axum::http::HeaderMap,
     Query(params): Query<AuthorizeRequest>,
 ) -> Response {
-    // Validate request
-    if let Err(response) = validate_authorize_request(&state, &params) {
+    // Resolve OAuth params - either from query string or from pending request
+    let oauth_params = if let Some(pending_id) = &params.pending {
+        // Returning from login - retrieve stored OAuth params
+        match state.storage.consume_pending_oauth(pending_id) {
+            Some(pending) => pending,
+            None => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Html("Invalid or expired authorization request. Please start over."),
+                )
+                    .into_response();
+            }
+        }
+    } else {
+        // Fresh request - extract from query params
+        let response_type = match &params.response_type {
+            Some(rt) => rt.clone(),
+            None => {
+                return (StatusCode::BAD_REQUEST, Html("Missing response_type")).into_response();
+            }
+        };
+
+        if response_type != "code" {
+            return (
+                StatusCode::BAD_REQUEST,
+                Html("Invalid response_type. Only 'code' is supported."),
+            )
+                .into_response();
+        }
+
+        let client_id = match &params.client_id {
+            Some(c) => c.clone(),
+            None => {
+                return (StatusCode::BAD_REQUEST, Html("Missing client_id")).into_response();
+            }
+        };
+
+        let redirect_uri = match &params.redirect_uri {
+            Some(r) => r.clone(),
+            None => {
+                return (StatusCode::BAD_REQUEST, Html("Missing redirect_uri")).into_response();
+            }
+        };
+
+        let code_challenge = match &params.code_challenge {
+            Some(c) => c.clone(),
+            None => {
+                return (StatusCode::BAD_REQUEST, Html("Missing code_challenge")).into_response();
+            }
+        };
+
+        let code_challenge_method = match &params.code_challenge_method {
+            Some(m) => m.clone(),
+            None => {
+                return (StatusCode::BAD_REQUEST, Html("Missing code_challenge_method"))
+                    .into_response();
+            }
+        };
+
+        PendingOAuthRequest {
+            client_id,
+            redirect_uri,
+            code_challenge,
+            code_challenge_method,
+            state: params.state.clone(),
+        }
+    };
+
+    // Validate the OAuth request
+    if let Err(response) = validate_oauth_params(&state, &oauth_params) {
         return response;
     }
 
-    // For Phase 1, we auto-approve and redirect immediately
-    // Phase 2 will add passkey authentication here
+    // Check for valid session
+    let _user = match validate_session_from_headers(&headers, &state) {
+        Some(u) => u,
+        None => {
+            // No valid session - store OAuth params and redirect to login
+            let pending_id = generate_random_string(32);
+            state.storage.store_pending_oauth(pending_id.clone(), oauth_params);
 
-    // In a real implementation, you'd show a consent page here
-    // For now, just generate the auth code and redirect
+            tracing::info!("No session - redirecting to login");
+            return Redirect::to(&format!("/login?pending={}", pending_id)).into_response();
+        }
+    };
 
+    // Valid session - issue auth code
     let code = generate_random_string(32);
     let code_hash = hash_token(&code);
 
     let auth_code = StoredAuthCode {
         code_hash,
-        client_id: params.client_id.clone(),
-        redirect_uri: params.redirect_uri.clone(),
-        code_challenge: params.code_challenge.clone(),
-        code_challenge_method: params.code_challenge_method.clone(),
+        client_id: oauth_params.client_id.clone(),
+        redirect_uri: oauth_params.redirect_uri.clone(),
+        code_challenge: oauth_params.code_challenge.clone(),
+        code_challenge_method: oauth_params.code_challenge_method.clone(),
         expires_at: Utc::now() + Duration::minutes(10),
         created_at: Utc::now(),
     };
@@ -85,41 +172,34 @@ pub async fn get_handler(
     state.storage.store_auth_code(auth_code);
 
     // Redirect with authorization code
-    let mut redirect_url = format!("{}?code={}", params.redirect_uri, code);
-    if let Some(s) = &params.state {
+    let mut redirect_url = format!("{}?code={}", oauth_params.redirect_uri, code);
+    if let Some(s) = &oauth_params.state {
         redirect_url.push_str(&format!("&state={}", urlencoding::encode(s)));
     }
 
     tracing::info!(
-        "Issued authorization code for client {} (auto-approved, passkey auth not yet implemented)",
-        params.client_id
+        "Issued authorization code for client {}",
+        oauth_params.client_id
     );
 
     Redirect::to(&redirect_url).into_response()
 }
 
-/// Handler for `POST /authorize` - processes consent form (for future use)
+/// Handler for `POST /authorize`
 pub async fn post_handler(
     State(state): State<Arc<AppState>>,
+    headers: axum::http::HeaderMap,
     Query(params): Query<AuthorizeRequest>,
 ) -> Response {
-    // For now, same as GET - auto-approve
-    get_handler(State(state), Query(params)).await
+    // Same as GET
+    get_handler(State(state), headers, Query(params)).await
 }
 
-/// Validate an authorization request
-fn validate_authorize_request(
+/// Validate OAuth request parameters
+fn validate_oauth_params(
     state: &AppState,
-    params: &AuthorizeRequest,
+    params: &PendingOAuthRequest,
 ) -> Result<(), Response> {
-    // Check response_type
-    if params.response_type != "code" {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Html("Invalid response_type. Only 'code' is supported."),
-        ).into_response());
-    }
-
     // Check code_challenge_method
     if params.code_challenge_method != "S256" {
         return Err(auth_error_redirect(

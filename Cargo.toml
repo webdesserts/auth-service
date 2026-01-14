@@ -30,6 +30,21 @@ sha2 = "0.10"
 base64 = "0.22"
 rand = "0.9"
 
+# WebAuthn
+webauthn-rs = { version = "0.5", features = ["danger-allow-state-serialisation"] }
+webauthn-rs-proto = "0.5"
+uuid = { version = "1", features = ["v4", "serde"] }
+
+# Session management
+cookie = { version = "0.18", features = ["signed", "percent-encode"] }
+axum-extra = { version = "0.10", features = ["cookie-signed"] }
+
+# Storage
+bincode = "1"
+fs2 = "0.4"
+hex = "0.4"
+time = "0.3"
+
 # CLI
 clap = { version = "4", features = ["derive", "env"] }
 

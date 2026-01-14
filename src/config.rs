@@ -20,6 +20,14 @@ pub struct Config {
     /// Token configuration
     #[serde(default)]
     pub tokens: TokenConfig,
+
+    /// WebAuthn configuration
+    #[serde(default)]
+    pub webauthn: WebAuthnConfig,
+
+    /// Session configuration
+    #[serde(default)]
+    pub session: SessionConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -53,6 +61,62 @@ impl Default for TokenConfig {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WebAuthnConfig {
+    /// Relying party ID (domain name, e.g. "leda.webdesserts.com")
+    #[serde(default = "default_rp_id")]
+    pub rp_id: String,
+
+    /// Relying party display name
+    #[serde(default = "default_rp_name")]
+    pub rp_name: String,
+
+    /// Origin URL (if different from https://{rp_id})
+    pub origin: Option<String>,
+}
+
+impl Default for WebAuthnConfig {
+    fn default() -> Self {
+        Self {
+            rp_id: default_rp_id(),
+            rp_name: default_rp_name(),
+            origin: None,
+        }
+    }
+}
+
+fn default_rp_id() -> String {
+    "leda.webdesserts.com".to_string()
+}
+
+fn default_rp_name() -> String {
+    "Obsidian Memory".to_string()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionConfig {
+    /// Session lifetime in seconds (default: 30 days)
+    #[serde(default = "default_session_lifetime")]
+    pub session_lifetime_secs: u64,
+
+    /// Cookie signing secret (32+ bytes, hex-encoded)
+    /// If not set, a random key is generated at startup (sessions won't survive restarts)
+    pub cookie_secret: Option<String>,
+}
+
+impl Default for SessionConfig {
+    fn default() -> Self {
+        Self {
+            session_lifetime_secs: default_session_lifetime(),
+            cookie_secret: None,
+        }
+    }
+}
+
+fn default_session_lifetime() -> u64 {
+    30 * 24 * 3600 // 30 days
+}
+
 fn default_true() -> bool {
     true
 }
@@ -67,9 +131,8 @@ fn default_refresh_token_lifetime() -> u64 {
 
 fn default_allowed_redirects() -> HashSet<String> {
     let mut set = HashSet::new();
-    // Claude iOS redirect URIs
-    set.insert("https://claude.ai/callback".to_string());
-    set.insert("https://claude.com/callback".to_string());
+    // Claude iOS MCP OAuth callback
+    set.insert("https://claude.ai/api/mcp/auth_callback".to_string());
     set
 }
 
@@ -79,6 +142,8 @@ impl Default for Config {
             api_keys: Vec::new(),
             allowed_redirect_uris: default_allowed_redirects(),
             tokens: TokenConfig::default(),
+            webauthn: WebAuthnConfig::default(),
+            session: SessionConfig::default(),
         }
     }
 }

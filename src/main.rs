@@ -7,9 +7,11 @@
 //! - Token exchange and refresh
 //! - API key validation
 //! - Caddy forward_auth integration
+//! - WebAuthn passkey authentication
 
 mod config;
 mod oauth;
+mod passkey;
 mod storage;
 mod validation;
 
@@ -20,10 +22,11 @@ use axum::{
     routing::{get, post},
     Router,
 };
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use tokio::signal;
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+use webauthn_rs::prelude::*;
 
 use crate::config::Config;
 use crate::storage::Storage;
@@ -46,7 +49,16 @@ struct Cli {
 
     /// Public URL for this service (used in OAuth metadata)
     #[arg(long, env = "AUTH_PUBLIC_URL")]
-    public_url: String,
+    public_url: Option<String>,
+
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+#[derive(Subcommand, Debug)]
+enum Command {
+    /// Reset all users, passkeys, and sessions (for recovery)
+    Reset,
 }
 
 /// Shared application state
@@ -54,6 +66,7 @@ pub struct AppState {
     pub config: Config,
     pub storage: Storage,
     pub public_url: String,
+    pub webauthn: Webauthn,
 }
 
 #[tokio::main]
@@ -71,12 +84,43 @@ async fn main() -> anyhow::Result<()> {
 
     // Load configuration
     let config = Config::load(&cli.config_path)?;
+
     let storage = Storage::new(&cli.config_path)?;
+
+    // Handle subcommands
+    if let Some(Command::Reset) = cli.command {
+        tracing::info!("Resetting all users, passkeys, and sessions...");
+        storage.reset_auth()?;
+        tracing::info!("Reset complete. Please re-register with a passkey.");
+        return Ok(());
+    }
+
+    // Require public_url for server mode
+    let public_url = cli.public_url.ok_or_else(|| {
+        anyhow::anyhow!("--public-url is required (or set AUTH_PUBLIC_URL)")
+    })?;
+
+    // Initialize WebAuthn
+    let webauthn = {
+        let rp_id = config.webauthn.rp_id.clone();
+        let rp_origin = config
+            .webauthn
+            .origin
+            .clone()
+            .unwrap_or_else(|| format!("https://{}", rp_id));
+        let rp_origin = Url::parse(&rp_origin)?;
+
+        let builder = WebauthnBuilder::new(&rp_id, &rp_origin)?
+            .rp_name(&config.webauthn.rp_name);
+
+        builder.build()?
+    };
 
     let state = Arc::new(AppState {
         config,
         storage,
-        public_url: cli.public_url.clone(),
+        public_url: public_url.clone(),
+        webauthn,
     });
 
     // Build router
@@ -95,6 +139,15 @@ async fn main() -> anyhow::Result<()> {
         .route("/token", post(oauth::token::handler))
         // Validation endpoint for Caddy forward_auth
         .route("/validate", get(validation::handler))
+        // Passkey setup routes
+        .route("/setup", get(passkey::setup::get_setup))
+        .route("/setup/register/start", post(passkey::setup::start_registration))
+        .route("/setup/register/finish", post(passkey::setup::finish_registration))
+        // Passkey login routes
+        .route("/login", get(passkey::login::get_login))
+        .route("/login/auth/start", post(passkey::login::start_auth))
+        .route("/login/auth/finish", post(passkey::login::finish_auth))
+        .route("/logout", post(passkey::login::logout))
         .layer(TraceLayer::new_for_http())
         .with_state(state);
 
@@ -102,7 +155,7 @@ async fn main() -> anyhow::Result<()> {
     let addr: SocketAddr = format!("{}:{}", cli.bind, cli.port).parse()?;
 
     tracing::info!("Starting auth-service on {}", addr);
-    tracing::info!("Public URL: {}", cli.public_url);
+    tracing::info!("Public URL: {}", public_url);
 
     // Start server
     let listener = tokio::net::TcpListener::bind(addr).await?;
