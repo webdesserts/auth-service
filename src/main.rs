@@ -107,7 +107,13 @@ async fn main() -> anyhow::Result<()> {
 
     // Initialize WebAuthn
     let webauthn = {
-        let rp_id = config.webauthn.rp_id.clone();
+        let rp_id = config.webauthn.rp_id.clone().unwrap_or_else(|| {
+            // Derive RP ID from public URL when not explicitly configured
+            Url::parse(&public_url)
+                .ok()
+                .and_then(|u| u.host_str().map(|h| h.to_string()))
+                .unwrap_or_else(|| "localhost".to_string())
+        });
         let rp_origin = config
             .webauthn
             .origin

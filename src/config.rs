@@ -63,9 +63,8 @@ impl Default for TokenConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WebAuthnConfig {
-    /// Relying party ID (domain name, e.g. "leda.webdesserts.com")
-    #[serde(default = "default_rp_id")]
-    pub rp_id: String,
+    /// Relying party ID (domain name). Defaults to the host from AUTH_PUBLIC_URL at startup.
+    pub rp_id: Option<String>,
 
     /// Relying party display name
     #[serde(default = "default_rp_name")]
@@ -78,15 +77,11 @@ pub struct WebAuthnConfig {
 impl Default for WebAuthnConfig {
     fn default() -> Self {
         Self {
-            rp_id: default_rp_id(),
+            rp_id: None,
             rp_name: default_rp_name(),
             origin: None,
         }
     }
-}
-
-fn default_rp_id() -> String {
-    "leda.webdesserts.com".to_string()
 }
 
 fn default_rp_name() -> String {
