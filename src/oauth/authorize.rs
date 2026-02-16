@@ -56,11 +56,16 @@ pub struct AuthorizeRequest {
 
 /// Authorization error response
 fn auth_error_redirect(redirect_uri: &str, error: &str, description: &str, state: Option<&str>) -> Redirect {
-    let mut url = format!("{}?error={}&error_description={}", redirect_uri, error, urlencoding::encode(description));
-    if let Some(s) = state {
-        url.push_str(&format!("&state={}", urlencoding::encode(s)));
+    let mut url = url::Url::parse(redirect_uri).expect("redirect_uri already validated");
+    {
+        let mut query = url.query_pairs_mut();
+        query.append_pair("error", error);
+        query.append_pair("error_description", description);
+        if let Some(s) = state {
+            query.append_pair("state", s);
+        }
     }
-    Redirect::to(&url)
+    Redirect::to(url.as_str())
 }
 
 /// Handler for `GET /authorize`
@@ -172,9 +177,13 @@ pub async fn get_handler(
     state.storage.store_auth_code(auth_code);
 
     // Redirect with authorization code
-    let mut redirect_url = format!("{}?code={}", oauth_params.redirect_uri, code);
-    if let Some(s) = &oauth_params.state {
-        redirect_url.push_str(&format!("&state={}", urlencoding::encode(s)));
+    let mut redirect_url = url::Url::parse(&oauth_params.redirect_uri).expect("redirect_uri already validated");
+    {
+        let mut query = redirect_url.query_pairs_mut();
+        query.append_pair("code", &code);
+        if let Some(s) = &oauth_params.state {
+            query.append_pair("state", s);
+        }
     }
 
     tracing::info!(
@@ -182,7 +191,7 @@ pub async fn get_handler(
         oauth_params.client_id
     );
 
-    Redirect::to(&redirect_url).into_response()
+    Redirect::to(redirect_url.as_str()).into_response()
 }
 
 /// Handler for `POST /authorize`
@@ -195,32 +204,16 @@ pub async fn post_handler(
     get_handler(State(state), headers, Query(params)).await
 }
 
-/// Validate OAuth request parameters
+/// Validate OAuth request parameters.
+///
+/// Client and redirect_uri are validated first so that error redirects only go to
+/// trusted URIs. Errors before redirect_uri is confirmed use HTML error pages instead.
 fn validate_oauth_params(
     state: &AppState,
     params: &PendingOAuthRequest,
 ) -> Result<(), Response> {
-    // Check code_challenge_method
-    if params.code_challenge_method != "S256" {
-        return Err(auth_error_redirect(
-            &params.redirect_uri,
-            "invalid_request",
-            "code_challenge_method must be S256",
-            params.state.as_deref(),
-        ).into_response());
-    }
-
-    // Validate code_challenge is present and reasonable length
-    if params.code_challenge.is_empty() || params.code_challenge.len() < 43 {
-        return Err(auth_error_redirect(
-            &params.redirect_uri,
-            "invalid_request",
-            "code_challenge is required and must be a valid S256 hash",
-            params.state.as_deref(),
-        ).into_response());
-    }
-
-    // Look up client
+    // Validate client and redirect_uri BEFORE using redirect_uri in any error responses.
+    // This prevents open redirects to unregistered URIs.
     let client = match state.storage.get_client(&params.client_id) {
         Some(c) => c,
         None => {
@@ -231,7 +224,6 @@ fn validate_oauth_params(
         }
     };
 
-    // Validate redirect_uri matches registered URI
     if !client.redirect_uris.contains(&params.redirect_uri) {
         return Err((
             StatusCode::BAD_REQUEST,
@@ -239,11 +231,25 @@ fn validate_oauth_params(
         ).into_response());
     }
 
+    // Now that redirect_uri is validated, we can safely redirect errors to it
+    if params.code_challenge_method != "S256" {
+        return Err(auth_error_redirect(
+            &params.redirect_uri,
+            "invalid_request",
+            "code_challenge_method must be S256",
+            params.state.as_deref(),
+        ).into_response());
+    }
+
+    if params.code_challenge.is_empty() || params.code_challenge.len() < 43 {
+        return Err(auth_error_redirect(
+            &params.redirect_uri,
+            "invalid_request",
+            "code_challenge is required and must be a valid S256 hash",
+            params.state.as_deref(),
+        ).into_response());
+    }
+
     Ok(())
 }
 
-mod urlencoding {
-    pub fn encode(s: &str) -> String {
-        url::form_urlencoded::byte_serialize(s.as_bytes()).collect()
-    }
-}
