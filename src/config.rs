@@ -208,7 +208,7 @@ fn is_localhost_redirect(uri: &str) -> bool {
         return false;
     }
 
-    let is_loopback = matches!(url.host_str(), Some("localhost" | "127.0.0.1"));
+    let is_loopback = matches!(url.host_str(), Some("localhost" | "127.0.0.1" | "[::1]"));
     let has_explicit_port = url.port().is_some();
 
     is_loopback && has_explicit_port
@@ -224,26 +224,36 @@ mod tests {
 
         assert!(config.is_redirect_allowed("http://localhost:54321/callback"));
         assert!(config.is_redirect_allowed("http://127.0.0.1:8080/callback"));
+        assert!(config.is_redirect_allowed("http://[::1]:8080/callback"));
         assert!(config.is_redirect_allowed("http://localhost:3000/"));
         assert!(config.is_redirect_allowed("http://localhost:9999/some/deep/path"));
+    }
+
+    #[test]
+    fn uppercase_localhost_is_normalized() {
+        assert!(is_localhost_redirect("http://LOCALHOST:8080/callback"));
+        assert!(is_localhost_redirect("http://Localhost:8080/callback"));
     }
 
     #[test]
     fn localhost_without_port_is_rejected() {
         assert!(!is_localhost_redirect("http://localhost/callback"));
         assert!(!is_localhost_redirect("http://127.0.0.1/callback"));
+        assert!(!is_localhost_redirect("http://[::1]/callback"));
     }
 
     #[test]
     fn https_localhost_is_rejected() {
         assert!(!is_localhost_redirect("https://localhost:8080/callback"));
         assert!(!is_localhost_redirect("https://127.0.0.1:8080/callback"));
+        assert!(!is_localhost_redirect("https://[::1]:8080/callback"));
     }
 
     #[test]
     fn non_loopback_hosts_are_rejected() {
         assert!(!is_localhost_redirect("http://example.com:8080/callback"));
         assert!(!is_localhost_redirect("http://192.168.1.1:8080/callback"));
+        assert!(!is_localhost_redirect("http://127.0.0.2:8080/callback"));
     }
 
     #[test]
