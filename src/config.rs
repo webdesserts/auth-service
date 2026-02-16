@@ -5,6 +5,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use url::Url;
 
 /// Main configuration for the auth service
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -185,8 +186,80 @@ impl Config {
             .any(|k| k.active && k.key == key)
     }
 
-    /// Check if a redirect URI is allowed
+    /// Check if a redirect URI is allowed.
+    ///
+    /// Allows loopback redirects (localhost/127.0.0.1 with explicit port over HTTP)
+    /// per RFC 8252 §7.3 for native CLI OAuth clients, in addition to the configured allowlist.
     pub fn is_redirect_allowed(&self, uri: &str) -> bool {
-        self.allowed_redirect_uris.contains(uri)
+        is_localhost_redirect(uri) || self.allowed_redirect_uris.contains(uri)
+    }
+}
+
+/// Check if a URI is a valid loopback OAuth redirect per RFC 8252 §7.3.
+///
+/// Requires HTTP scheme, explicit port, and host of `localhost` or `127.0.0.1`.
+/// Any path is allowed since different clients use different callback paths.
+fn is_localhost_redirect(uri: &str) -> bool {
+    let Ok(url) = Url::parse(uri) else {
+        return false;
+    };
+
+    if url.scheme() != "http" {
+        return false;
+    }
+
+    let is_loopback = matches!(url.host_str(), Some("localhost" | "127.0.0.1"));
+    let has_explicit_port = url.port().is_some();
+
+    is_loopback && has_explicit_port
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn localhost_redirects_are_allowed() {
+        let config = Config::default();
+
+        assert!(config.is_redirect_allowed("http://localhost:54321/callback"));
+        assert!(config.is_redirect_allowed("http://127.0.0.1:8080/callback"));
+        assert!(config.is_redirect_allowed("http://localhost:3000/"));
+        assert!(config.is_redirect_allowed("http://localhost:9999/some/deep/path"));
+    }
+
+    #[test]
+    fn localhost_without_port_is_rejected() {
+        assert!(!is_localhost_redirect("http://localhost/callback"));
+        assert!(!is_localhost_redirect("http://127.0.0.1/callback"));
+    }
+
+    #[test]
+    fn https_localhost_is_rejected() {
+        assert!(!is_localhost_redirect("https://localhost:8080/callback"));
+        assert!(!is_localhost_redirect("https://127.0.0.1:8080/callback"));
+    }
+
+    #[test]
+    fn non_loopback_hosts_are_rejected() {
+        assert!(!is_localhost_redirect("http://example.com:8080/callback"));
+        assert!(!is_localhost_redirect("http://192.168.1.1:8080/callback"));
+    }
+
+    #[test]
+    fn allowlist_redirects_still_work() {
+        let config = Config::default();
+
+        assert!(config.is_redirect_allowed("https://claude.ai/api/mcp/auth_callback"));
+        assert!(config.is_redirect_allowed("https://claude.ai/callback"));
+        assert!(config.is_redirect_allowed("https://claude.com/callback"));
+    }
+
+    #[test]
+    fn unknown_redirects_are_rejected() {
+        let config = Config::default();
+
+        assert!(!config.is_redirect_allowed("https://evil.com/callback"));
+        assert!(!config.is_redirect_allowed("http://example.com:8080/callback"));
     }
 }
