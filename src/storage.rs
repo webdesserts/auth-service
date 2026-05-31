@@ -284,7 +284,10 @@ impl Storage {
             let content = std::fs::read_to_string(&path)?;
             let store: ClientStore = serde_json::from_str(&content)?;
             *self.clients.write().unwrap() = store;
-            tracing::info!("Loaded {} registered clients", self.clients.read().unwrap().clients.len());
+            tracing::info!(
+                "Loaded {} registered clients",
+                self.clients.read().unwrap().clients.len()
+            );
         }
         Ok(())
     }
@@ -307,7 +310,10 @@ impl Storage {
             store.tokens.retain(|_, t| t.expires_at > now);
 
             *self.tokens.write().unwrap() = store;
-            tracing::info!("Loaded {} active tokens", self.tokens.read().unwrap().tokens.len());
+            tracing::info!(
+                "Loaded {} active tokens",
+                self.tokens.read().unwrap().tokens.len()
+            );
         }
         Ok(())
     }
@@ -547,41 +553,61 @@ impl Storage {
         store
             .registration
             .retain(|_, (_, created)| created.elapsed() < Self::CHALLENGE_TTL);
-        store.registration.insert(challenge_id, (state, Instant::now()));
+        store
+            .registration
+            .insert(challenge_id, (state, Instant::now()));
     }
 
     /// Consume registration challenge (returns and removes it)
-    pub fn consume_registration_challenge(&self, challenge_id: &str) -> Option<PasskeyRegistration> {
+    pub fn consume_registration_challenge(
+        &self,
+        challenge_id: &str,
+    ) -> Option<PasskeyRegistration> {
         let mut store = self.webauthn_challenges.write().unwrap();
-        store.registration.remove(challenge_id).and_then(|(state, created)| {
-            if created.elapsed() < Self::CHALLENGE_TTL {
-                Some(state)
-            } else {
-                None
-            }
-        })
+        store
+            .registration
+            .remove(challenge_id)
+            .and_then(|(state, created)| {
+                if created.elapsed() < Self::CHALLENGE_TTL {
+                    Some(state)
+                } else {
+                    None
+                }
+            })
     }
 
     /// Store authentication challenge state
-    pub fn store_authentication_challenge(&self, challenge_id: String, state: PasskeyAuthentication) {
+    pub fn store_authentication_challenge(
+        &self,
+        challenge_id: String,
+        state: PasskeyAuthentication,
+    ) {
         let mut store = self.webauthn_challenges.write().unwrap();
         // Clean up expired challenges
         store
             .authentication
             .retain(|_, (_, created)| created.elapsed() < Self::CHALLENGE_TTL);
-        store.authentication.insert(challenge_id, (state, Instant::now()));
+        store
+            .authentication
+            .insert(challenge_id, (state, Instant::now()));
     }
 
     /// Consume authentication challenge (returns and removes it)
-    pub fn consume_authentication_challenge(&self, challenge_id: &str) -> Option<PasskeyAuthentication> {
+    pub fn consume_authentication_challenge(
+        &self,
+        challenge_id: &str,
+    ) -> Option<PasskeyAuthentication> {
         let mut store = self.webauthn_challenges.write().unwrap();
-        store.authentication.remove(challenge_id).and_then(|(state, created)| {
-            if created.elapsed() < Self::CHALLENGE_TTL {
-                Some(state)
-            } else {
-                None
-            }
-        })
+        store
+            .authentication
+            .remove(challenge_id)
+            .and_then(|(state, created)| {
+                if created.elapsed() < Self::CHALLENGE_TTL {
+                    Some(state)
+                } else {
+                    None
+                }
+            })
     }
 
     // --- Pending OAuth Request Management (in-memory, short-lived) ---
@@ -601,13 +627,16 @@ impl Storage {
     /// Consume pending OAuth request (returns and removes it)
     pub fn consume_pending_oauth(&self, pending_id: &str) -> Option<PendingOAuthRequest> {
         let mut store = self.pending_oauth.write().unwrap();
-        store.requests.remove(pending_id).and_then(|(req, created)| {
-            if created.elapsed() < Self::PENDING_OAUTH_TTL {
-                Some(req)
-            } else {
-                None
-            }
-        })
+        store
+            .requests
+            .remove(pending_id)
+            .and_then(|(req, created)| {
+                if created.elapsed() < Self::PENDING_OAUTH_TTL {
+                    Some(req)
+                } else {
+                    None
+                }
+            })
     }
 
     // --- Additional Persistence Paths ---
@@ -760,7 +789,7 @@ pub fn generate_random_string(len: usize) -> String {
 
 /// Hash a token/code for storage (we don't store raw tokens)
 pub fn hash_token(token: &str) -> String {
-    use sha2::{Sha256, Digest};
+    use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
     hasher.update(token.as_bytes());
     let result = hasher.finalize();

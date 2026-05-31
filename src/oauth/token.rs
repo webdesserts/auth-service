@@ -7,17 +7,17 @@
 use std::sync::Arc;
 
 use axum::{
+    Form, Json,
     extract::State,
     http::StatusCode,
     response::{IntoResponse, Response},
-    Form, Json,
 };
 use chrono::{Duration, Utc};
 use serde::{Deserialize, Serialize};
-use sha2::{Sha256, Digest};
+use sha2::{Digest, Sha256};
 
-use crate::storage::{generate_random_string, hash_token, StoredToken, TokenType};
 use crate::AppState;
+use crate::storage::{StoredToken, TokenType, generate_random_string, hash_token};
 
 /// Token request (form-encoded)
 #[derive(Debug, Deserialize)]
@@ -75,62 +75,74 @@ pub async fn handler(
             StatusCode::BAD_REQUEST,
             Json(TokenError {
                 error: "unsupported_grant_type".to_string(),
-                error_description: Some("Only authorization_code and refresh_token grants are supported".to_string()),
+                error_description: Some(
+                    "Only authorization_code and refresh_token grants are supported".to_string(),
+                ),
             }),
-        ).into_response(),
+        )
+            .into_response(),
     }
 }
 
 /// Handle authorization_code grant
-async fn handle_authorization_code(
-    state: &AppState,
-    request: &TokenRequest,
-) -> Response {
+async fn handle_authorization_code(state: &AppState, request: &TokenRequest) -> Response {
     // Validate required fields
     let code = match &request.code {
         Some(c) => c,
-        None => return (
-            StatusCode::BAD_REQUEST,
-            Json(TokenError {
-                error: "invalid_request".to_string(),
-                error_description: Some("code is required".to_string()),
-            }),
-        ).into_response(),
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(TokenError {
+                    error: "invalid_request".to_string(),
+                    error_description: Some("code is required".to_string()),
+                }),
+            )
+                .into_response();
+        }
     };
 
     let code_verifier = match &request.code_verifier {
         Some(v) => v,
-        None => return (
-            StatusCode::BAD_REQUEST,
-            Json(TokenError {
-                error: "invalid_request".to_string(),
-                error_description: Some("code_verifier is required".to_string()),
-            }),
-        ).into_response(),
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(TokenError {
+                    error: "invalid_request".to_string(),
+                    error_description: Some("code_verifier is required".to_string()),
+                }),
+            )
+                .into_response();
+        }
     };
 
     let redirect_uri = match &request.redirect_uri {
         Some(r) => r,
-        None => return (
-            StatusCode::BAD_REQUEST,
-            Json(TokenError {
-                error: "invalid_request".to_string(),
-                error_description: Some("redirect_uri is required".to_string()),
-            }),
-        ).into_response(),
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(TokenError {
+                    error: "invalid_request".to_string(),
+                    error_description: Some("redirect_uri is required".to_string()),
+                }),
+            )
+                .into_response();
+        }
     };
 
     // Look up and consume the authorization code
     let code_hash = hash_token(code);
     let auth_code = match state.storage.consume_auth_code(&code_hash) {
         Some(c) => c,
-        None => return (
-            StatusCode::BAD_REQUEST,
-            Json(TokenError {
-                error: "invalid_grant".to_string(),
-                error_description: Some("Authorization code is invalid or expired".to_string()),
-            }),
-        ).into_response(),
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(TokenError {
+                    error: "invalid_grant".to_string(),
+                    error_description: Some("Authorization code is invalid or expired".to_string()),
+                }),
+            )
+                .into_response();
+        }
     };
 
     // Verify client_id matches
@@ -141,7 +153,8 @@ async fn handle_authorization_code(
                 error: "invalid_grant".to_string(),
                 error_description: Some("client_id does not match".to_string()),
             }),
-        ).into_response();
+        )
+            .into_response();
     }
 
     // Verify redirect_uri matches
@@ -152,7 +165,8 @@ async fn handle_authorization_code(
                 error: "invalid_grant".to_string(),
                 error_description: Some("redirect_uri does not match".to_string()),
             }),
-        ).into_response();
+        )
+            .into_response();
     }
 
     // Verify PKCE code_verifier
@@ -163,7 +177,8 @@ async fn handle_authorization_code(
                 error: "invalid_grant".to_string(),
                 error_description: Some("code_verifier does not match code_challenge".to_string()),
             }),
-        ).into_response();
+        )
+            .into_response();
     }
 
     // Generate tokens
@@ -193,7 +208,8 @@ async fn handle_authorization_code(
                 error: "server_error".to_string(),
                 error_description: Some("Failed to generate token".to_string()),
             }),
-        ).into_response();
+        )
+            .into_response();
     }
 
     // Store refresh token
@@ -215,7 +231,8 @@ async fn handle_authorization_code(
                 error: "server_error".to_string(),
                 error_description: Some("Failed to generate token".to_string()),
             }),
-        ).into_response();
+        )
+            .into_response();
     }
 
     tracing::info!("Issued access token for client {}", request.client_id);
@@ -228,36 +245,40 @@ async fn handle_authorization_code(
             expires_in: access_token_lifetime,
             refresh_token: Some(refresh_token),
         }),
-    ).into_response()
+    )
+        .into_response()
 }
 
 /// Handle refresh_token grant
-async fn handle_refresh_token(
-    state: &AppState,
-    request: &TokenRequest,
-) -> Response {
+async fn handle_refresh_token(state: &AppState, request: &TokenRequest) -> Response {
     let refresh_token = match &request.refresh_token {
         Some(t) => t,
-        None => return (
-            StatusCode::BAD_REQUEST,
-            Json(TokenError {
-                error: "invalid_request".to_string(),
-                error_description: Some("refresh_token is required".to_string()),
-            }),
-        ).into_response(),
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(TokenError {
+                    error: "invalid_request".to_string(),
+                    error_description: Some("refresh_token is required".to_string()),
+                }),
+            )
+                .into_response();
+        }
     };
 
     // Validate refresh token
     let refresh_token_hash = hash_token(refresh_token);
     let stored_refresh = match state.storage.validate_token(&refresh_token_hash) {
         Some(t) if t.token_type == TokenType::Refresh => t,
-        _ => return (
-            StatusCode::BAD_REQUEST,
-            Json(TokenError {
-                error: "invalid_grant".to_string(),
-                error_description: Some("Refresh token is invalid or expired".to_string()),
-            }),
-        ).into_response(),
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(TokenError {
+                    error: "invalid_grant".to_string(),
+                    error_description: Some("Refresh token is invalid or expired".to_string()),
+                }),
+            )
+                .into_response();
+        }
     };
 
     // Verify client_id matches
@@ -268,7 +289,8 @@ async fn handle_refresh_token(
                 error: "invalid_grant".to_string(),
                 error_description: Some("client_id does not match".to_string()),
             }),
-        ).into_response();
+        )
+            .into_response();
     }
 
     // Revoke old access token if it exists
@@ -299,7 +321,8 @@ async fn handle_refresh_token(
                 error: "server_error".to_string(),
                 error_description: Some("Failed to generate token".to_string()),
             }),
-        ).into_response();
+        )
+            .into_response();
     }
 
     tracing::info!("Refreshed access token for client {}", request.client_id);
@@ -313,7 +336,8 @@ async fn handle_refresh_token(
             expires_in: access_token_lifetime,
             refresh_token: None, // Keep using the same refresh token
         }),
-    ).into_response()
+    )
+        .into_response()
 }
 
 /// Verify PKCE code_verifier against code_challenge (S256 method)
@@ -322,10 +346,8 @@ fn verify_pkce(code_challenge: &str, code_verifier: &str) -> bool {
     let mut hasher = Sha256::new();
     hasher.update(code_verifier.as_bytes());
     let hash = hasher.finalize();
-    let computed_challenge = base64::Engine::encode(
-        &base64::engine::general_purpose::URL_SAFE_NO_PAD,
-        hash,
-    );
+    let computed_challenge =
+        base64::Engine::encode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, hash);
 
     computed_challenge == code_challenge
 }

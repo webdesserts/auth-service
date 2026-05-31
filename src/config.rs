@@ -154,15 +154,12 @@ impl Config {
         if config_file.exists() {
             let content = std::fs::read_to_string(&config_file)
                 .with_context(|| format!("Failed to read config file: {:?}", config_file))?;
-            let config: Config = serde_json::from_str(&content)
-                .with_context(|| "Failed to parse config.json")?;
+            let config: Config =
+                serde_json::from_str(&content).with_context(|| "Failed to parse config.json")?;
             tracing::info!("Loaded configuration from {:?}", config_file);
             Ok(config)
         } else {
-            tracing::info!(
-                "No config file found at {:?}, using defaults",
-                config_file
-            );
+            tracing::info!("No config file found at {:?}, using defaults", config_file);
             let config = Config::default();
 
             // Create config directory if it doesn't exist
@@ -181,9 +178,7 @@ impl Config {
 
     /// Check if an API key is valid
     pub fn validate_api_key(&self, key: &str) -> bool {
-        self.api_keys
-            .iter()
-            .any(|k| k.active && k.key == key)
+        self.api_keys.iter().any(|k| k.active && k.key == key)
     }
 
     /// Check if a redirect URI is allowed.

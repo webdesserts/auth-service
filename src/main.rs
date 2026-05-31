@@ -19,8 +19,8 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use axum::{
-    routing::{get, post},
     Router,
+    routing::{get, post},
 };
 use clap::{Parser, Subcommand};
 use tokio::signal;
@@ -101,9 +101,9 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // Require public_url for server mode
-    let public_url = cli.public_url.ok_or_else(|| {
-        anyhow::anyhow!("--public-url is required (or set AUTH_PUBLIC_URL)")
-    })?;
+    let public_url = cli
+        .public_url
+        .ok_or_else(|| anyhow::anyhow!("--public-url is required (or set AUTH_PUBLIC_URL)"))?;
 
     // Initialize WebAuthn
     let webauthn = {
@@ -121,8 +121,7 @@ async fn main() -> anyhow::Result<()> {
             .unwrap_or_else(|| format!("https://{}", rp_id));
         let rp_origin = Url::parse(&rp_origin)?;
 
-        let builder = WebauthnBuilder::new(&rp_id, &rp_origin)?
-            .rp_name(&config.webauthn.rp_name);
+        let builder = WebauthnBuilder::new(&rp_id, &rp_origin)?.rp_name(&config.webauthn.rp_name);
 
         builder.build()?
     };
@@ -153,8 +152,14 @@ async fn main() -> anyhow::Result<()> {
         .route("/validate", get(validation::handler))
         // Passkey setup routes
         .route("/setup", get(passkey::setup::get_setup))
-        .route("/setup/register/start", post(passkey::setup::start_registration))
-        .route("/setup/register/finish", post(passkey::setup::finish_registration))
+        .route(
+            "/setup/register/start",
+            post(passkey::setup::start_registration),
+        )
+        .route(
+            "/setup/register/finish",
+            post(passkey::setup::finish_registration),
+        )
         // Passkey login routes
         .route("/login", get(passkey::login::get_login))
         .route("/login/auth/start", post(passkey::login::start_auth))

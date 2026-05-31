@@ -13,9 +13,9 @@ use axum::{
 use chrono::{Duration, Utc};
 use serde::Deserialize;
 
-use crate::passkey::validate_session_from_headers;
-use crate::storage::{generate_random_string, hash_token, PendingOAuthRequest, StoredAuthCode};
 use crate::AppState;
+use crate::passkey::validate_session_from_headers;
+use crate::storage::{PendingOAuthRequest, StoredAuthCode, generate_random_string, hash_token};
 
 /// Authorization request parameters
 #[derive(Debug, Deserialize)]
@@ -55,7 +55,12 @@ pub struct AuthorizeRequest {
 }
 
 /// Authorization error response
-fn auth_error_redirect(redirect_uri: &str, error: &str, description: &str, state: Option<&str>) -> Redirect {
+fn auth_error_redirect(
+    redirect_uri: &str,
+    error: &str,
+    description: &str,
+    state: Option<&str>,
+) -> Redirect {
     let mut url = url::Url::parse(redirect_uri).expect("redirect_uri already validated");
     {
         let mut query = url.query_pairs_mut();
@@ -128,7 +133,10 @@ pub async fn get_handler(
         let code_challenge_method = match &params.code_challenge_method {
             Some(m) => m.clone(),
             None => {
-                return (StatusCode::BAD_REQUEST, Html("Missing code_challenge_method"))
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Html("Missing code_challenge_method"),
+                )
                     .into_response();
             }
         };
@@ -153,10 +161,16 @@ pub async fn get_handler(
         None => {
             // No valid session - store OAuth params and redirect to login
             let pending_id = generate_random_string(32);
-            state.storage.store_pending_oauth(pending_id.clone(), oauth_params);
+            state
+                .storage
+                .store_pending_oauth(pending_id.clone(), oauth_params);
 
             tracing::info!("No session - redirecting to login");
-            return Redirect::to(&format!("{}/login?pending={}", state.path_prefix, pending_id)).into_response();
+            return Redirect::to(&format!(
+                "{}/login?pending={}",
+                state.path_prefix, pending_id
+            ))
+            .into_response();
         }
     };
 
@@ -177,7 +191,8 @@ pub async fn get_handler(
     state.storage.store_auth_code(auth_code);
 
     // Redirect with authorization code
-    let mut redirect_url = url::Url::parse(&oauth_params.redirect_uri).expect("redirect_uri already validated");
+    let mut redirect_url =
+        url::Url::parse(&oauth_params.redirect_uri).expect("redirect_uri already validated");
     {
         let mut query = redirect_url.query_pairs_mut();
         query.append_pair("code", &code);
@@ -208,10 +223,7 @@ pub async fn post_handler(
 ///
 /// Client and redirect_uri are validated first so that error redirects only go to
 /// trusted URIs. Errors before redirect_uri is confirmed use HTML error pages instead.
-fn validate_oauth_params(
-    state: &AppState,
-    params: &PendingOAuthRequest,
-) -> Result<(), Response> {
+fn validate_oauth_params(state: &AppState, params: &PendingOAuthRequest) -> Result<(), Response> {
     // Validate client and redirect_uri BEFORE using redirect_uri in any error responses.
     // This prevents open redirects to unregistered URIs.
     let client = match state.storage.get_client(&params.client_id) {
@@ -220,7 +232,8 @@ fn validate_oauth_params(
             return Err((
                 StatusCode::BAD_REQUEST,
                 Html("Unknown client_id. Please register first."),
-            ).into_response());
+            )
+                .into_response());
         }
     };
 
@@ -228,7 +241,8 @@ fn validate_oauth_params(
         return Err((
             StatusCode::BAD_REQUEST,
             Html("redirect_uri does not match registered URIs for this client."),
-        ).into_response());
+        )
+            .into_response());
     }
 
     // Now that redirect_uri is validated, we can safely redirect errors to it
@@ -238,7 +252,8 @@ fn validate_oauth_params(
             "invalid_request",
             "code_challenge_method must be S256",
             params.state.as_deref(),
-        ).into_response());
+        )
+        .into_response());
     }
 
     if params.code_challenge.is_empty() || params.code_challenge.len() < 43 {
@@ -247,9 +262,9 @@ fn validate_oauth_params(
             "invalid_request",
             "code_challenge is required and must be a valid S256 hash",
             params.state.as_deref(),
-        ).into_response());
+        )
+        .into_response());
     }
 
     Ok(())
 }
-

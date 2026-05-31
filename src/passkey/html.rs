@@ -65,7 +65,12 @@ pub fn already_setup_page(path_prefix: &str) -> String {
 /// Login page for passkey authentication
 pub fn login_page(path_prefix: &str, return_to: Option<&str>) -> String {
     let return_input = return_to
-        .map(|r| format!(r#"<input type="hidden" id="return_to" value="{}">"#, html_escape(r)))
+        .map(|r| {
+            format!(
+                r#"<input type="hidden" id="return_to" value="{}">"#,
+                html_escape(r)
+            )
+        })
         .unwrap_or_default();
 
     format!(

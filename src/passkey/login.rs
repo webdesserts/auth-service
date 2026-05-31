@@ -3,17 +3,17 @@
 use std::sync::Arc;
 
 use axum::{
-    extract::{Query, State},
-    http::{header, StatusCode},
-    response::{Html, IntoResponse, Response},
     Json,
+    extract::{Query, State},
+    http::{StatusCode, header},
+    response::{Html, IntoResponse, Response},
 };
 use cookie::{Cookie, SameSite};
 use serde::{Deserialize, Serialize};
 use webauthn_rs::prelude::*;
 
-use crate::storage::generate_random_string;
 use crate::AppState;
+use crate::storage::generate_random_string;
 
 use super::html;
 
@@ -61,7 +61,10 @@ pub async fn start_auth(State(state): State<Arc<AppState>>) -> impl IntoResponse
     }
 
     // Collect all passkeys for authentication
-    let passkeys: Vec<Passkey> = stored_passkeys.iter().map(|sp| sp.passkey.clone()).collect();
+    let passkeys: Vec<Passkey> = stored_passkeys
+        .iter()
+        .map(|sp| sp.passkey.clone())
+        .collect();
 
     // Start WebAuthn authentication
     let result = state.webauthn.start_passkey_authentication(&passkeys);
@@ -109,7 +112,10 @@ pub async fn finish_auth(
     Json(req): Json<FinishAuthRequest>,
 ) -> Response {
     // Consume the authentication challenge
-    let auth_state = match state.storage.consume_authentication_challenge(&req.challenge_id) {
+    let auth_state = match state
+        .storage
+        .consume_authentication_challenge(&req.challenge_id)
+    {
         Some(s) => s,
         None => {
             return (
@@ -137,14 +143,16 @@ pub async fn finish_auth(
     };
 
     // Find the user by credential ID
-    let (user, mut passkey) =
-        match state.storage.find_user_by_credential(auth_result.cred_id().as_ref()) {
-            Some(r) => r,
-            None => {
-                tracing::error!("Credential not found after successful auth");
-                return (StatusCode::INTERNAL_SERVER_ERROR, "User not found").into_response();
-            }
-        };
+    let (user, mut passkey) = match state
+        .storage
+        .find_user_by_credential(auth_result.cred_id().as_ref())
+    {
+        Some(r) => r,
+        None => {
+            tracing::error!("Credential not found after successful auth");
+            return (StatusCode::INTERNAL_SERVER_ERROR, "User not found").into_response();
+        }
+    };
 
     // Update the passkey's counter (important for detecting cloned keys)
     if auth_result.needs_update() {
@@ -162,7 +170,11 @@ pub async fn finish_auth(
         Ok(t) => t,
         Err(e) => {
             tracing::error!("Failed to create session: {:?}", e);
-            return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to create session").into_response();
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to create session",
+            )
+                .into_response();
         }
     };
 
@@ -215,11 +227,7 @@ pub async fn logout(
         .max_age(time::Duration::ZERO)
         .build();
 
-    (
-        [(header::SET_COOKIE, cookie.to_string())],
-        "Logged out",
-    )
-        .into_response()
+    ([(header::SET_COOKIE, cookie.to_string())], "Logged out").into_response()
 }
 
 /// Helper to validate session from request headers

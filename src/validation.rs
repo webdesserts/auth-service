@@ -13,17 +13,14 @@ use axum::{
     response::IntoResponse,
 };
 
-use crate::storage::hash_token;
 use crate::AppState;
+use crate::storage::hash_token;
 
 /// Validation endpoint for Caddy forward_auth
 ///
 /// Returns 200 if the request is authenticated, 401 otherwise.
 /// Caddy will proxy the request only if this returns 200.
-pub async fn handler(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-) -> impl IntoResponse {
+pub async fn handler(State(state): State<Arc<AppState>>, headers: HeaderMap) -> impl IntoResponse {
     // Extract Authorization header
     let auth_header = match headers.get("authorization") {
         Some(h) => h,

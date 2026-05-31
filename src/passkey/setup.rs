@@ -3,16 +3,16 @@
 use std::sync::Arc;
 
 use axum::{
+    Json,
     extract::State,
     http::StatusCode,
     response::{Html, IntoResponse},
-    Json,
 };
 use serde::{Deserialize, Serialize};
 use webauthn_rs::prelude::*;
 
-use crate::storage::generate_random_string;
 use crate::AppState;
+use crate::storage::generate_random_string;
 
 use super::html;
 
@@ -54,11 +54,7 @@ pub async fn start_registration(
     // Validate username
     let username = req.username.trim();
     if username.is_empty() || username.len() > 64 {
-        return (
-            StatusCode::BAD_REQUEST,
-            "Username must be 1-64 characters",
-        )
-            .into_response();
+        return (StatusCode::BAD_REQUEST, "Username must be 1-64 characters").into_response();
     }
 
     // Generate user ID for this registration (will be used when credential is verified)
@@ -178,7 +174,10 @@ pub async fn finish_registration(
         return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to store passkey").into_response();
     }
 
-    tracing::info!("Setup complete: created user {} with passkey", user.username);
+    tracing::info!(
+        "Setup complete: created user {} with passkey",
+        user.username
+    );
 
     (StatusCode::OK, "Passkey registered successfully").into_response()
 }

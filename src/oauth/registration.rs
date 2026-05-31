@@ -5,17 +5,12 @@
 
 use std::sync::Arc;
 
-use axum::{
-    extract::State,
-    http::StatusCode,
-    response::IntoResponse,
-    Json,
-};
+use axum::{Json, extract::State, http::StatusCode, response::IntoResponse};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
-use crate::storage::{generate_random_string, RegisteredClient};
 use crate::AppState;
+use crate::storage::{RegisteredClient, generate_random_string};
 
 /// Client registration request (RFC 7591 Section 2)
 #[derive(Debug, Deserialize)]
@@ -107,7 +102,10 @@ pub async fn handler(
     // Check each redirect URI against allowed list
     for uri in &request.redirect_uris {
         if !state.config.is_redirect_allowed(uri) {
-            tracing::warn!("Rejected registration with disallowed redirect URI: {}", uri);
+            tracing::warn!(
+                "Rejected registration with disallowed redirect URI: {}",
+                uri
+            );
             return (
                 StatusCode::BAD_REQUEST,
                 Json(RegistrationError {
@@ -144,7 +142,11 @@ pub async fn handler(
             .into_response();
     }
 
-    tracing::info!("Registered new client: {} ({:?})", client_id, request.client_name);
+    tracing::info!(
+        "Registered new client: {} ({:?})",
+        client_id,
+        request.client_name
+    );
 
     // Return registration response
     let response = RegistrationResponse {
@@ -154,7 +156,10 @@ pub async fn handler(
         redirect_uris: request.redirect_uris,
         client_name: request.client_name,
         token_endpoint_auth_method: "none".to_string(),
-        grant_types: vec!["authorization_code".to_string(), "refresh_token".to_string()],
+        grant_types: vec![
+            "authorization_code".to_string(),
+            "refresh_token".to_string(),
+        ],
         response_types: vec!["code".to_string()],
     };
 
