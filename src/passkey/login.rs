@@ -208,15 +208,15 @@ pub async fn logout(
     headers: axum::http::HeaderMap,
 ) -> Response {
     // Get and revoke session from cookie
-    if let Some(cookie_header) = headers.get(header::COOKIE) {
-        if let Ok(cookie_str) = cookie_header.to_str() {
-            for cookie_part in cookie_str.split(';') {
-                if let Ok(cookie) = Cookie::parse(cookie_part.trim()) {
-                    if cookie.name() == SESSION_COOKIE_NAME {
-                        let _ = state.storage.revoke_session(cookie.value());
-                        break;
-                    }
-                }
+    if let Some(cookie_header) = headers.get(header::COOKIE)
+        && let Ok(cookie_str) = cookie_header.to_str()
+    {
+        for cookie_part in cookie_str.split(';') {
+            if let Ok(cookie) = Cookie::parse(cookie_part.trim())
+                && cookie.name() == SESSION_COOKIE_NAME
+            {
+                let _ = state.storage.revoke_session(cookie.value());
+                break;
             }
         }
     }
@@ -239,10 +239,10 @@ pub fn validate_session_from_headers(
     let cookie_str = cookie_header.to_str().ok()?;
 
     for cookie_part in cookie_str.split(';') {
-        if let Ok(cookie) = Cookie::parse(cookie_part.trim()) {
-            if cookie.name() == SESSION_COOKIE_NAME {
-                return state.storage.validate_session(cookie.value());
-            }
+        if let Ok(cookie) = Cookie::parse(cookie_part.trim())
+            && cookie.name() == SESSION_COOKIE_NAME
+        {
+            return state.storage.validate_session(cookie.value());
         }
     }
     None

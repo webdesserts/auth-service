@@ -223,6 +223,10 @@ pub async fn post_handler(
 ///
 /// Client and redirect_uri are validated first so that error redirects only go to
 /// trusted URIs. Errors before redirect_uri is confirmed use HTML error pages instead.
+// The Err variant is an axum `Response` by design — these handlers signal HTTP errors
+// by returning a ready-to-send response on a cold validation path, so boxing it for the
+// size lint would add indirection without meaningful benefit.
+#[allow(clippy::result_large_err)]
 fn validate_oauth_params(state: &AppState, params: &PendingOAuthRequest) -> Result<(), Response> {
     // Validate client and redirect_uri BEFORE using redirect_uri in any error responses.
     // This prevents open redirects to unregistered URIs.

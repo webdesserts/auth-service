@@ -58,14 +58,14 @@ pub async fn handler(State(state): State<Arc<AppState>>, headers: HeaderMap) -> 
 
         // Otherwise, check if it's a valid OAuth token
         let token_hash = hash_token(token);
-        if let Some(stored_token) = state.storage.validate_token(&token_hash) {
-            if stored_token.token_type == crate::storage::TokenType::Access {
-                tracing::debug!(
-                    "Request authenticated via OAuth token for client {}",
-                    stored_token.client_id
-                );
-                return (StatusCode::OK, [("WWW-Authenticate", "")], "OK");
-            }
+        if let Some(stored_token) = state.storage.validate_token(&token_hash)
+            && stored_token.token_type == crate::storage::TokenType::Access
+        {
+            tracing::debug!(
+                "Request authenticated via OAuth token for client {}",
+                stored_token.client_id
+            );
+            return (StatusCode::OK, [("WWW-Authenticate", "")], "OK");
         }
 
         tracing::debug!("Invalid or expired token");
