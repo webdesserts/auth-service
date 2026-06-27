@@ -10,6 +10,13 @@ description = "OAuth 2.1 + API key authentication service for obsidian-memory"
 name = "auth-service"
 path = "src/main.rs"
 
+# Under precise-builds, dist applies the workspace-global `features`
+# (`embedded-model`, `sync`) to every dist package individually. auth-service
+# has neither feature, so override to build it with no extra features.
+[package.metadata.dist]
+features = []
+default-features = true
+
 [dependencies]
 # Web framework
 axum = { version = "0.8", features = ["macros"] }
