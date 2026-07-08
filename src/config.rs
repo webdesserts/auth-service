@@ -176,9 +176,9 @@ impl Config {
         }
     }
 
-    /// Check if an API key is valid
-    pub fn validate_api_key(&self, key: &str) -> bool {
-        self.api_keys.iter().any(|k| k.active && k.key == key)
+    /// Find the active API key matching the given key value, if any.
+    pub fn find_api_key(&self, key: &str) -> Option<&ApiKey> {
+        self.api_keys.iter().find(|k| k.active && k.key == key)
     }
 
     /// Check if a redirect URI is allowed.
