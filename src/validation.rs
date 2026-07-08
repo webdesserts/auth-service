@@ -44,14 +44,22 @@ enum BearerAttempt {
 pub async fn handler(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
     // Cheapest checks first: API key / OAuth bearer token.
     let bearer_attempt = authenticate_bearer(&state, &headers);
-    if let BearerAttempt::Success(identity) = &bearer_attempt {
-        return authorized(identity);
+    if let BearerAttempt::Success(identity) = &bearer_attempt
+        && let Some(response) = try_authorized(identity)
+    {
+        return response;
     }
 
     // Passkey session cookie (browser clients) — tried last since it requires a
-    // session-store lookup.
-    if let Some(identity) = authenticate_session(&state, &headers) {
-        return authorized(&identity);
+    // session-store lookup. Note: falling through to the session cookie here
+    // after a Bearer credential was present-but-invalid (revoked/expired
+    // token, wrong API key) is intentional, not a bypass — each credential is
+    // fully and independently validated; a failed one just doesn't rule out
+    // a different, valid one arriving on the same request.
+    if let Some(identity) = authenticate_session(&state, &headers)
+        && let Some(response) = try_authorized(&identity)
+    {
+        return response;
     }
 
     match bearer_attempt {
@@ -118,10 +126,25 @@ fn authenticate_session(state: &AppState, headers: &HeaderMap) -> Option<String>
 
 /// Build a 200 response carrying `X-Auth-User` — the mandatory identity-injection
 /// invariant. See module docs.
-fn authorized(identity: &str) -> Response {
+///
+/// Returns `None` (refusing to authorize) if `identity` is empty after
+/// trimming — e.g. an `ApiKey` with a blank `name` in `config.json`, which
+/// nothing validates on load. This is the single chokepoint every credential
+/// type funnels through, so the check only needs to exist once: an
+/// unidentifiable credential is treated as not authenticated at all, rather
+/// than authorized with a blank (or placeholder) `X-Auth-User`. A blank
+/// value would still technically satisfy "the header is always present" for
+/// the GHSA-7r4p-vjf4-gxv4 mitigation, but it defeats the header's actual
+/// purpose — a real caller identity for audit/accountability — so refusing
+/// outright is the safer default for an auth boundary.
+fn try_authorized(identity: &str) -> Option<Response> {
+    if identity.trim().is_empty() {
+        tracing::warn!("Refusing to authorize a request with an empty caller identity");
+        return None;
+    }
     let mut headers = HeaderMap::new();
     headers.insert(X_AUTH_USER, identity_header_value(identity));
-    (StatusCode::OK, headers, "OK").into_response()
+    Some((StatusCode::OK, headers, "OK").into_response())
 }
 
 fn unauthorized(www_authenticate: &'static str, body: &'static str) -> Response {
@@ -335,6 +358,33 @@ mod tests {
         let (state, _dir) = test_state(Config::default());
 
         let response = handler(State(state), HeaderMap::new()).await;
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert!(response.headers().get("x-auth-user").is_none());
+    }
+
+    #[tokio::test]
+    async fn empty_identity_credential_is_refused_not_authorized_with_blank_header() {
+        // A misconfigured API key with a blank `name` — nothing validates
+        // this on config.json load — must not produce a 2xx with an empty
+        // (or missing-but-still-200) X-Auth-User. It's refused outright.
+        let config = Config {
+            api_keys: vec![ApiKey {
+                key: "test-api-key".to_string(),
+                name: "".to_string(),
+                active: true,
+            }],
+            ..Config::default()
+        };
+        let (state, _dir) = test_state(config);
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "authorization",
+            HeaderValue::from_static("Bearer test-api-key"),
+        );
+
+        let response = handler(State(state), headers).await;
 
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
         assert!(response.headers().get("x-auth-user").is_none());
