@@ -21,10 +21,8 @@ pub const SESSION_COOKIE_NAME: &str = "auth_session";
 
 #[derive(Debug, Deserialize)]
 pub struct LoginQuery {
-    /// Return URL after successful login (for OAuth flow)
+    /// Return URL after successful login
     pub return_to: Option<String>,
-    /// Pending OAuth request ID
-    pub pending: Option<String>,
 }
 
 /// GET /login - Show login page
@@ -37,13 +35,7 @@ pub async fn get_login(
         return Html(html::redirect_page(&format!("{}/setup", state.path_prefix)));
     }
 
-    // Determine the return URL
-    let return_to = query
-        .pending
-        .map(|p| format!("{}/authorize?pending={}", state.path_prefix, p))
-        .or(query.return_to);
-
-    Html(html::login_page(&state.path_prefix, return_to.as_deref()))
+    Html(html::login_page(&state.path_prefix, query.return_to.as_deref()))
 }
 
 #[derive(Debug, Serialize)]
@@ -183,7 +175,7 @@ pub async fn finish_auth(
         .path("/")
         .http_only(true)
         .secure(true)
-        .same_site(SameSite::Lax) // Allow on top-level OAuth redirects
+        .same_site(SameSite::Lax) // Allow on top-level redirects
         .max_age(time::Duration::seconds(
             state.config.session.session_lifetime_secs as i64,
         ))
