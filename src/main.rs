@@ -1,16 +1,11 @@
-//! OAuth 2.1 + API key authentication service for obsidian-memory
+//! API key authentication service for obsidian-memory
 //!
 //! Provides:
-//! - RFC 8414 OAuth metadata discovery
-//! - RFC 7591 Dynamic Client Registration (manual implementation)
-//! - Authorization code flow with PKCE
-//! - Token exchange and refresh
 //! - API key validation
 //! - Caddy forward_auth integration
 //! - WebAuthn passkey authentication
 
 mod config;
-mod oauth;
 mod passkey;
 mod storage;
 mod validation;
@@ -33,7 +28,7 @@ use crate::storage::Storage;
 
 #[derive(Parser, Debug)]
 #[command(name = "auth-service")]
-#[command(about = "OAuth 2.1 authentication service for obsidian-memory")]
+#[command(about = "API key authentication service for obsidian-memory")]
 struct Cli {
     /// Port to listen on
     #[arg(long, default_value_t = 3001, env = "AUTH_PORT")]
@@ -47,7 +42,7 @@ struct Cli {
     #[arg(long, default_value = "/config", env = "AUTH_CONFIG_PATH")]
     config_path: String,
 
-    /// Public URL for this service (used in OAuth metadata)
+    /// Public URL for this service (used for WebAuthn rp_id/origin derivation)
     #[arg(long, env = "AUTH_PUBLIC_URL")]
     public_url: Option<String>,
 
@@ -136,18 +131,6 @@ async fn main() -> anyhow::Result<()> {
 
     // Build router
     let app = Router::new()
-        // OAuth metadata (RFC 8414)
-        .route(
-            "/.well-known/oauth-authorization-server",
-            get(oauth::metadata::handler),
-        )
-        // Dynamic Client Registration (RFC 7591)
-        .route("/register", post(oauth::registration::handler))
-        // Authorization endpoint
-        .route("/authorize", get(oauth::authorize::get_handler))
-        .route("/authorize", post(oauth::authorize::post_handler))
-        // Token endpoint
-        .route("/token", post(oauth::token::handler))
         // Validation endpoint for Caddy forward_auth
         .route("/validate", get(validation::handler))
         // Passkey setup routes

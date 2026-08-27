@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
-description = "OAuth 2.1 + API key authentication service for obsidian-memory"
+description = "API key authentication service for obsidian-memory"
 
 [[bin]]
 name = "auth-service"
@@ -23,10 +23,6 @@ axum = { version = "0.8", features = ["macros"] }
 tokio = { version = "1", features = ["full"] }
 tower = "0.5"
 tower-http = { version = "0.6", features = ["cors", "trace"] }
-
-# OAuth
-oxide-auth = "0.6"
-oxide-auth-axum = "0.5"
 
 # Serialization
 serde.workspace = true

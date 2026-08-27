@@ -2,7 +2,6 @@
 //!
 //! This endpoint is called by Caddy before proxying requests to protected services.
 //! It validates:
-//! - OAuth Bearer tokens
 //! - API keys
 //! - Passkey session cookies (browser clients)
 //!
@@ -22,12 +21,11 @@ use axum::{
 };
 
 use crate::AppState;
-use crate::storage::hash_token;
 
 const X_AUTH_USER: HeaderName = HeaderName::from_static("x-auth-user");
 
 /// Outcome of attempting to authenticate via the `Authorization: Bearer` header
-/// (API key or OAuth access token).
+/// (API key).
 enum BearerAttempt {
     /// Authenticated; carries the identity to record in `X-Auth-User`.
     Success(String),
@@ -42,7 +40,7 @@ enum BearerAttempt {
 /// Returns 200 if the request is authenticated, 401 otherwise.
 /// Caddy will proxy the request only if this returns 200.
 pub async fn handler(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
-    // Cheapest checks first: API key / OAuth bearer token.
+    // Cheapest check first: API key bearer token.
     let bearer_attempt = authenticate_bearer(&state, &headers);
     if let BearerAttempt::Success(identity) = &bearer_attempt
         && let Some(response) = try_authorized(identity)
@@ -73,8 +71,7 @@ pub async fn handler(State(state): State<Arc<AppState>>, headers: HeaderMap) -> 
     }
 }
 
-/// Attempt to authenticate via `Authorization: Bearer <token>` (API key or OAuth
-/// access token).
+/// Attempt to authenticate via `Authorization: Bearer <token>` (API key).
 fn authenticate_bearer(state: &AppState, headers: &HeaderMap) -> BearerAttempt {
     let Some(auth_header) = headers.get("authorization") else {
         tracing::debug!("No Authorization header present");
@@ -92,22 +89,9 @@ fn authenticate_bearer(state: &AppState, headers: &HeaderMap) -> BearerAttempt {
     };
     let token = token.trim();
 
-    // First, check if it's an API key
     if let Some(api_key) = state.config.find_api_key(token) {
         tracing::debug!("Request authenticated via API key {}", api_key.name);
         return BearerAttempt::Success(api_key.name.clone());
-    }
-
-    // Otherwise, check if it's a valid OAuth token
-    let token_hash = hash_token(token);
-    if let Some(stored_token) = state.storage.validate_token(&token_hash)
-        && stored_token.token_type == crate::storage::TokenType::Access
-    {
-        tracing::debug!(
-            "Request authenticated via OAuth token for client {}",
-            stored_token.client_id
-        );
-        return BearerAttempt::Success(stored_token.client_id.clone());
     }
 
     tracing::debug!("Invalid or expired token");
@@ -172,8 +156,7 @@ fn identity_header_value(identity: &str) -> HeaderValue {
 mod tests {
     use super::*;
     use crate::config::{ApiKey, Config};
-    use crate::storage::{Storage, StoredToken, TokenType};
-    use chrono::{Duration, Utc};
+    use crate::storage::Storage;
     use tempfile::TempDir;
     use webauthn_rs::prelude::*;
 
@@ -241,69 +224,6 @@ mod tests {
         headers.insert(
             "authorization",
             HeaderValue::from_static("Bearer test-api-key"),
-        );
-
-        let response = handler(State(state), headers).await;
-
-        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-        assert!(response.headers().get("x-auth-user").is_none());
-    }
-
-    #[tokio::test]
-    async fn oauth_bearer_success_sets_x_auth_user() {
-        let (state, _dir) = test_state(Config::default());
-
-        let raw_token = "raw-access-token";
-        let token_hash = hash_token(raw_token);
-        state
-            .storage
-            .store_token(StoredToken {
-                token_hash,
-                client_id: "test-client".to_string(),
-                token_type: TokenType::Access,
-                expires_at: Utc::now() + Duration::hours(1),
-                created_at: Utc::now(),
-                associated_token: None,
-            })
-            .expect("store token");
-
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            "authorization",
-            HeaderValue::from_str(&format!("Bearer {raw_token}")).unwrap(),
-        );
-
-        let response = handler(State(state), headers).await;
-
-        assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(
-            response.headers().get("x-auth-user").unwrap(),
-            "test-client"
-        );
-    }
-
-    #[tokio::test]
-    async fn oauth_refresh_token_is_not_accepted_for_validation() {
-        let (state, _dir) = test_state(Config::default());
-
-        let raw_token = "raw-refresh-token";
-        let token_hash = hash_token(raw_token);
-        state
-            .storage
-            .store_token(StoredToken {
-                token_hash,
-                client_id: "test-client".to_string(),
-                token_type: TokenType::Refresh,
-                expires_at: Utc::now() + Duration::hours(1),
-                created_at: Utc::now(),
-                associated_token: None,
-            })
-            .expect("store token");
-
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            "authorization",
-            HeaderValue::from_str(&format!("Bearer {raw_token}")).unwrap(),
         );
 
         let response = handler(State(state), headers).await;
