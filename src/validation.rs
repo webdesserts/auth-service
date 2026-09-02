@@ -11,6 +11,20 @@
 //! Caddy versions before 2.11.2 don't strip a client's own forged copy of a header
 //! the backend sometimes omits (GHSA-7r4p-vjf4-gxv4). Always setting the header on
 //! every success path closes that gap regardless of the deployed Caddy version.
+//!
+//! **`X-Auth-Actor` is set conditionally**, only when the winning credential
+//! carries a known actor uuid (today: session-cookie logins, via
+//! `StoredUser.id`). API keys have no uuid to attach yet (they gain one at
+//! t:227), so the header is omitted entirely rather than always-set with an
+//! empty/placeholder value — absence maps directly onto
+//! `headers.get(...) == None` with no special-casing, unlike a blank
+//! sentinel a consumer would have to know to treat as "actually absent".
+//! Unlike `X-Auth-User`, this header has no in-app always-set fallback, so
+//! its forgery-safety is a live-Caddy-version property: Caddy >=2.11.2's
+//! `copy_headers` unconditionally deletes a client-supplied copy of a named
+//! header before conditionally setting it from the auth response, so a
+//! forged `X-Auth-Actor` on the inbound request is always stripped. Verified
+//! against the pinned deployment version in `deploy/t228/verify/`.
 
 use std::sync::Arc;
 
@@ -19,10 +33,12 @@ use axum::{
     http::{HeaderMap, HeaderName, HeaderValue, StatusCode, header},
     response::{IntoResponse, Response},
 };
+use uuid::Uuid;
 
 use crate::AppState;
 
 const X_AUTH_USER: HeaderName = HeaderName::from_static("x-auth-user");
+const X_AUTH_ACTOR: HeaderName = HeaderName::from_static("x-auth-actor");
 
 /// Outcome of attempting to authenticate via the `Authorization: Bearer` header
 /// (API key).
@@ -43,7 +59,7 @@ pub async fn handler(State(state): State<Arc<AppState>>, headers: HeaderMap) -> 
     // Cheapest check first: API key bearer token.
     let bearer_attempt = authenticate_bearer(&state, &headers);
     if let BearerAttempt::Success(identity) = &bearer_attempt
-        && let Some(response) = try_authorized(identity)
+        && let Some(response) = try_authorized(identity, None)
     {
         return response;
     }
@@ -54,8 +70,8 @@ pub async fn handler(State(state): State<Arc<AppState>>, headers: HeaderMap) -> 
     // token, wrong API key) is intentional, not a bypass — each credential is
     // fully and independently validated; a failed one just doesn't rule out
     // a different, valid one arriving on the same request.
-    if let Some(identity) = authenticate_session(&state, &headers)
-        && let Some(response) = try_authorized(&identity)
+    if let Some(user) = authenticate_session(&state, &headers)
+        && let Some(response) = try_authorized(&user.username, Some(user.id))
     {
         return response;
     }
@@ -99,17 +115,21 @@ fn authenticate_bearer(state: &AppState, headers: &HeaderMap) -> BearerAttempt {
 }
 
 /// Attempt to authenticate via the passkey session cookie (browser clients).
-fn authenticate_session(state: &AppState, headers: &HeaderMap) -> Option<String> {
+fn authenticate_session(
+    state: &AppState,
+    headers: &HeaderMap,
+) -> Option<crate::storage::StoredUser> {
     let user = crate::passkey::validate_session_from_headers(headers, state)?;
     tracing::debug!(
         "Request authenticated via session cookie for user {}",
         user.username
     );
-    Some(user.username)
+    Some(user)
 }
 
 /// Build a 200 response carrying `X-Auth-User` — the mandatory identity-injection
-/// invariant. See module docs.
+/// invariant — and, when `actor_uuid` is known, `X-Auth-Actor`. See module docs
+/// for why the actor header is conditional rather than always-set.
 ///
 /// Returns `None` (refusing to authorize) if `identity` is empty after
 /// trimming — e.g. an `ApiKey` with a blank `name` in `config.json`, which
@@ -120,14 +140,25 @@ fn authenticate_session(state: &AppState, headers: &HeaderMap) -> Option<String>
 /// value would still technically satisfy "the header is always present" for
 /// the GHSA-7r4p-vjf4-gxv4 mitigation, but it defeats the header's actual
 /// purpose — a real caller identity for audit/accountability — so refusing
-/// outright is the safer default for an auth boundary.
-fn try_authorized(identity: &str) -> Option<Response> {
+/// outright is the safer default for an auth boundary. This check is
+/// independent of `actor_uuid`, so it never blocks a uuid-less credential
+/// (API keys today) from authorizing.
+fn try_authorized(identity: &str, actor_uuid: Option<Uuid>) -> Option<Response> {
     if identity.trim().is_empty() {
         tracing::warn!("Refusing to authorize a request with an empty caller identity");
         return None;
     }
     let mut headers = HeaderMap::new();
     headers.insert(X_AUTH_USER, identity_header_value(identity));
+    if let Some(uuid) = actor_uuid {
+        // Uuid's Display form is a fixed hyphenated-lowercase-hex charset —
+        // always a valid HeaderValue, so no sanitization is needed here
+        // unlike `identity_header_value` above.
+        headers.insert(
+            X_AUTH_ACTOR,
+            HeaderValue::from_str(&uuid.to_string()).expect("uuid string is a valid header value"),
+        );
+    }
     Some((StatusCode::OK, headers, "OK").into_response())
 }
 
@@ -321,5 +352,58 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
         assert!(response.headers().get("x-auth-user").is_none());
+    }
+
+    #[tokio::test]
+    async fn session_cookie_success_sets_x_auth_actor_uuid() {
+        let (state, _dir) = test_state(Config::default());
+
+        let user = state
+            .storage
+            .create_user("michael".to_string())
+            .expect("create user");
+        let session_token = state
+            .storage
+            .create_session(user.id, 3600)
+            .expect("create session");
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::COOKIE,
+            HeaderValue::from_str(&format!("auth_session={session_token}")).unwrap(),
+        );
+
+        let response = handler(State(state), headers).await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get("x-auth-actor").unwrap(),
+            user.id.to_string().as_str()
+        );
+    }
+
+    #[tokio::test]
+    async fn api_key_success_omits_x_auth_actor() {
+        let config = Config {
+            api_keys: vec![ApiKey {
+                key: "test-api-key".to_string(),
+                name: "ci-bot".to_string(),
+                active: true,
+            }],
+            ..Config::default()
+        };
+        let (state, _dir) = test_state(config);
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "authorization",
+            HeaderValue::from_static("Bearer test-api-key"),
+        );
+
+        let response = handler(State(state), headers).await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers().get("x-auth-user").unwrap(), "ci-bot");
+        assert!(response.headers().get("x-auth-actor").is_none());
     }
 }
