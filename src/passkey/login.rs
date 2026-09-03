@@ -19,6 +19,20 @@ use super::html;
 
 pub const SESSION_COOKIE_NAME: &str = "auth_session";
 
+/// Build the session cookie used by both the passkey login flow and the API
+/// key→session exchange (`/login/key`). Shared so the cookie's security
+/// attributes (http-only, secure, `SameSite=Lax` for top-level redirects) stay
+/// identical across every login path.
+pub(crate) fn build_session_cookie(session_token: &str, lifetime_secs: u64) -> Cookie<'static> {
+    Cookie::build((SESSION_COOKIE_NAME, session_token.to_string()))
+        .path("/")
+        .http_only(true)
+        .secure(true)
+        .same_site(SameSite::Lax)
+        .max_age(time::Duration::seconds(lifetime_secs as i64))
+        .build()
+}
+
 #[derive(Debug, Deserialize)]
 pub struct LoginQuery {
     /// Return URL after successful login
@@ -35,7 +49,10 @@ pub async fn get_login(
         return Html(html::redirect_page(&format!("{}/setup", state.path_prefix)));
     }
 
-    Html(html::login_page(&state.path_prefix, query.return_to.as_deref()))
+    Html(html::login_page(
+        &state.path_prefix,
+        query.return_to.as_deref(),
+    ))
 }
 
 #[derive(Debug, Serialize)]
@@ -171,15 +188,7 @@ pub async fn finish_auth(
     };
 
     // Build session cookie
-    let cookie = Cookie::build((SESSION_COOKIE_NAME, session_token))
-        .path("/")
-        .http_only(true)
-        .secure(true)
-        .same_site(SameSite::Lax) // Allow on top-level redirects
-        .max_age(time::Duration::seconds(
-            state.config.session.session_lifetime_secs as i64,
-        ))
-        .build();
+    let cookie = build_session_cookie(&session_token, state.config.session.session_lifetime_secs);
 
     // Determine redirect URL
     let redirect_to = req.return_to.unwrap_or_else(|| "/".to_string());

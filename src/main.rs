@@ -6,6 +6,7 @@
 //! - WebAuthn passkey authentication
 
 mod config;
+mod key_login;
 mod passkey;
 mod storage;
 mod validation;
@@ -200,6 +201,8 @@ async fn main() -> anyhow::Result<()> {
         .route("/login/auth/start", post(passkey::login::start_auth))
         .route("/login/auth/finish", post(passkey::login::finish_auth))
         .route("/logout", post(passkey::login::logout))
+        // API key → session exchange (header-less guest floor)
+        .route("/login/key", post(key_login::login_key))
         .layer(TraceLayer::new_for_http())
         .with_state(state);
 
