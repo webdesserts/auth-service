@@ -43,8 +43,12 @@ const X_AUTH_ACTOR: HeaderName = HeaderName::from_static("x-auth-actor");
 /// Outcome of attempting to authenticate via the `Authorization: Bearer` header
 /// (API key).
 enum BearerAttempt {
-    /// Authenticated; carries the identity to record in `X-Auth-User`.
-    Success(String),
+    /// Authenticated; carries the identity to record in `X-Auth-User` and, for
+    /// an actor-bound storage key, the uuid to record in `X-Auth-Actor`.
+    Success {
+        identity: String,
+        actor_uuid: Option<Uuid>,
+    },
     /// A Bearer credential was presented but is invalid or expired.
     Invalid,
     /// No `Authorization: Bearer` credential was present in the request.
@@ -58,8 +62,11 @@ enum BearerAttempt {
 pub async fn handler(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
     // Cheapest check first: API key bearer token.
     let bearer_attempt = authenticate_bearer(&state, &headers);
-    if let BearerAttempt::Success(identity) = &bearer_attempt
-        && let Some(response) = try_authorized(identity, None)
+    if let BearerAttempt::Success {
+        identity,
+        actor_uuid,
+    } = &bearer_attempt
+        && let Some(response) = try_authorized(identity, *actor_uuid)
     {
         return response;
     }
@@ -77,11 +84,10 @@ pub async fn handler(State(state): State<Arc<AppState>>, headers: HeaderMap) -> 
     }
 
     match bearer_attempt {
-        BearerAttempt::Invalid => unauthorized(
-            "Bearer error=\"invalid_token\"",
-            "Invalid or expired token",
-        ),
-        BearerAttempt::Absent | BearerAttempt::Success(_) => {
+        BearerAttempt::Invalid => {
+            unauthorized("Bearer error=\"invalid_token\"", "Invalid or expired token")
+        }
+        BearerAttempt::Absent | BearerAttempt::Success { .. } => {
             unauthorized("Bearer", "Missing or invalid credentials")
         }
     }
@@ -105,9 +111,25 @@ fn authenticate_bearer(state: &AppState, headers: &HeaderMap) -> BearerAttempt {
     };
     let token = token.trim();
 
+    // Runtime storage keys (actor-bound, hashed, constant-time compare) win
+    // first: they can carry an actor uuid for X-Auth-Actor.
+    if let Some(stored) = state.storage.find_api_key_by_secret(token) {
+        tracing::debug!("Request authenticated via storage API key {}", stored.name);
+        return BearerAttempt::Success {
+            identity: stored.name,
+            actor_uuid: stored.actor_uuid,
+        };
+    }
+
+    // Legacy config-file api keys — read-once plaintext fallback, kept so the
+    // live config key keeps authenticating unchanged until it is migrated into
+    // runtime storage.
     if let Some(api_key) = state.config.find_api_key(token) {
-        tracing::debug!("Request authenticated via API key {}", api_key.name);
-        return BearerAttempt::Success(api_key.name.clone());
+        tracing::debug!("Request authenticated via config API key {}", api_key.name);
+        return BearerAttempt::Success {
+            identity: api_key.name.clone(),
+            actor_uuid: None,
+        };
     }
 
     tracing::debug!("Invalid or expired token");
@@ -178,7 +200,13 @@ fn unauthorized(www_authenticate: &'static str, body: &'static str) -> Response 
 fn identity_header_value(identity: &str) -> HeaderValue {
     let sanitized: String = identity
         .chars()
-        .map(|c| if c.is_ascii_graphic() || c == ' ' { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_graphic() || c == ' ' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
     HeaderValue::from_str(&sanitized).unwrap_or_else(|_| HeaderValue::from_static("unknown"))
 }
@@ -404,6 +432,86 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(response.headers().get("x-auth-user").unwrap(), "ci-bot");
+        assert!(response.headers().get("x-auth-actor").is_none());
+    }
+
+    #[tokio::test]
+    async fn revoked_storage_key_is_rejected() {
+        let (state, _dir) = test_state(Config::default());
+        let actor = Uuid::new_v4();
+        let raw_key = state
+            .storage
+            .issue_api_key(Some(actor), "runtime-key")
+            .expect("issue key");
+
+        // An active storage key authenticates and carries its bound actor uuid.
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "authorization",
+            HeaderValue::from_str(&format!("Bearer {raw_key}")).unwrap(),
+        );
+        let response = handler(State(state.clone()), headers.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get("x-auth-user").unwrap(),
+            "runtime-key"
+        );
+        assert_eq!(
+            response.headers().get("x-auth-actor").unwrap(),
+            actor.to_string().as_str()
+        );
+
+        // Revocation takes effect on the very next request, no restart.
+        assert!(state.storage.revoke_api_key("runtime-key").expect("revoke"));
+        let response = handler(State(state), headers).await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert!(response.headers().get("x-auth-user").is_none());
+    }
+
+    #[tokio::test]
+    async fn storage_key_without_actor_uuid_omits_x_auth_actor() {
+        let (state, _dir) = test_state(Config::default());
+        let raw_key = state
+            .storage
+            .issue_api_key(None, "uuidless-key")
+            .expect("issue key");
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "authorization",
+            HeaderValue::from_str(&format!("Bearer {raw_key}")).unwrap(),
+        );
+        let response = handler(State(state), headers).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get("x-auth-user").unwrap(),
+            "uuidless-key"
+        );
+        assert!(response.headers().get("x-auth-actor").is_none());
+    }
+
+    #[tokio::test]
+    async fn config_api_key_authenticates_via_legacy_fallback() {
+        // A config-file key (no storage key present) still authenticates via the
+        // legacy read-once fallback. Severing that fallback makes this go red.
+        let config = Config {
+            api_keys: vec![ApiKey {
+                key: "legacy-config-key".to_string(),
+                name: "OpenCode".to_string(),
+                active: true,
+            }],
+            ..Config::default()
+        };
+        let (state, _dir) = test_state(config);
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "authorization",
+            HeaderValue::from_static("Bearer legacy-config-key"),
+        );
+        let response = handler(State(state), headers).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers().get("x-auth-user").unwrap(), "OpenCode");
         assert!(response.headers().get("x-auth-actor").is_none());
     }
 }

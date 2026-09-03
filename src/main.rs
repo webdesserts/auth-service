@@ -21,10 +21,11 @@ use clap::{Parser, Subcommand};
 use tokio::signal;
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+use uuid::Uuid;
 use webauthn_rs::prelude::*;
 
 use crate::config::Config;
-use crate::storage::Storage;
+use crate::storage::{Storage, StoredUser};
 
 #[derive(Parser, Debug)]
 #[command(name = "auth-service")]
@@ -56,8 +57,28 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Command {
-    /// Reset all users, passkeys, and sessions (for recovery)
+    /// Reset all users, passkeys, sessions, and API keys (for recovery)
     Reset,
+    /// Create a guest user (a login-capable principal) with a handle
+    CreateGuest {
+        /// Handle for the guest (ASCII letters, digits, hyphens only)
+        #[arg(long)]
+        handle: String,
+    },
+    /// Issue a runtime API key bound to a user; prints the raw key once
+    IssueKey {
+        /// User to bind the key to (uuid or handle)
+        #[arg(long)]
+        user: String,
+        /// Human-readable name for the key
+        #[arg(long)]
+        name: String,
+    },
+    /// Revoke a runtime API key by its name or stored hash
+    RevokeKey {
+        /// Key name or stored hash to revoke
+        identifier: String,
+    },
 }
 
 /// Shared application state
@@ -88,11 +109,42 @@ async fn main() -> anyhow::Result<()> {
     let storage = Storage::new(&cli.config_path)?;
 
     // Handle subcommands
-    if let Some(Command::Reset) = cli.command {
-        tracing::info!("Resetting all users, passkeys, and sessions...");
-        storage.reset_auth()?;
-        tracing::info!("Reset complete. Please re-register with a passkey.");
-        return Ok(());
+    match cli.command {
+        Some(Command::Reset) => {
+            tracing::info!("Resetting all users, passkeys, sessions, and API keys...");
+            storage.reset_auth()?;
+            tracing::info!("Reset complete. Please re-register with a passkey.");
+            return Ok(());
+        }
+        Some(Command::CreateGuest { handle }) => {
+            let user = storage.create_guest_user(&handle)?;
+            println!(
+                "Created guest user '{}' with uuid {}",
+                user.username, user.id
+            );
+            return Ok(());
+        }
+        Some(Command::IssueKey { user, name }) => {
+            let principal = resolve_user(&storage, &user)
+                .ok_or_else(|| anyhow::anyhow!("No user found for '{}'", user))?;
+            let raw_key = storage.issue_api_key(Some(principal.id), &name)?;
+            println!(
+                "Issued API key '{}' for user '{}' ({})",
+                name, principal.username, principal.id
+            );
+            println!("{}", raw_key);
+            println!("(store this now — it cannot be recovered)");
+            return Ok(());
+        }
+        Some(Command::RevokeKey { identifier }) => {
+            if storage.revoke_api_key(&identifier)? {
+                println!("Revoked API key '{}'", identifier);
+            } else {
+                println!("No active API key matched '{}'", identifier);
+            }
+            return Ok(());
+        }
+        None => {}
     }
 
     // Require public_url for server mode
@@ -165,6 +217,15 @@ async fn main() -> anyhow::Result<()> {
 
     tracing::info!("Auth service shut down");
     Ok(())
+}
+
+/// Resolve a `--user` argument (a uuid or a handle) to a stored user.
+fn resolve_user(storage: &Storage, user: &str) -> Option<StoredUser> {
+    if let Ok(uuid) = Uuid::parse_str(user) {
+        storage.get_user(uuid)
+    } else {
+        storage.find_user_by_username(user)
+    }
 }
 
 async fn shutdown_signal() {

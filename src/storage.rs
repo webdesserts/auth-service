@@ -23,6 +23,8 @@ pub struct Storage {
     passkeys: RwLock<PasskeyStore>,
     /// Active sessions
     sessions: RwLock<SessionStore>,
+    /// Runtime-managed API keys (actor-bound, hashed)
+    api_keys: RwLock<ApiKeyStore>,
     /// WebAuthn challenge state (in-memory, short-lived)
     webauthn_challenges: RwLock<WebAuthnChallengeStore>,
 }
@@ -43,6 +45,12 @@ struct PasskeyStore {
 struct SessionStore {
     /// Maps session_hash -> session data
     sessions: HashMap<String, StoredSession>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct ApiKeyStore {
+    /// Maps key_hash -> stored key
+    keys: HashMap<String, StoredApiKey>,
 }
 
 /// In-memory WebAuthn challenge state (not persisted)
@@ -79,6 +87,23 @@ pub struct StoredSession {
     pub created_at: DateTime<Utc>,
 }
 
+/// A runtime-managed API key.
+///
+/// The raw secret is never stored — only its hash — and lookups compare hashes
+/// in constant time. `actor_uuid` binds the key to a registered principal (a
+/// `StoredUser`) so `/validate` can emit `X-Auth-Actor` and `/login/key` can
+/// mint a session for that principal. A key with no `actor_uuid` authenticates
+/// by name only, matching the legacy config-key behavior, and cannot be
+/// exchanged for a session.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StoredApiKey {
+    pub key_hash: String,
+    pub actor_uuid: Option<Uuid>,
+    pub name: String,
+    pub active: bool,
+    pub created_at: DateTime<Utc>,
+}
+
 impl Storage {
     /// Create a new storage instance
     pub fn new(config_path: &str) -> Result<Self> {
@@ -91,6 +116,7 @@ impl Storage {
             users: RwLock::new(UserStore::default()),
             passkeys: RwLock::new(PasskeyStore::default()),
             sessions: RwLock::new(SessionStore::default()),
+            api_keys: RwLock::new(ApiKeyStore::default()),
             webauthn_challenges: RwLock::new(WebAuthnChallengeStore::default()),
         };
 
@@ -98,6 +124,7 @@ impl Storage {
         storage.load_users()?;
         storage.load_passkeys()?;
         storage.load_sessions()?;
+        storage.load_api_keys()?;
 
         // Cleanup expired sessions on startup
         storage.cleanup_expired_sessions();
@@ -140,6 +167,50 @@ impl Storage {
     /// Get a user by ID
     pub fn get_user(&self, user_id: Uuid) -> Option<StoredUser> {
         self.users.read().unwrap().users.get(&user_id).cloned()
+    }
+
+    /// Find a user by username (handle).
+    pub fn find_user_by_username(&self, username: &str) -> Option<StoredUser> {
+        self.users
+            .read()
+            .unwrap()
+            .users
+            .values()
+            .find(|u| u.username == username)
+            .cloned()
+    }
+
+    /// Create a guest user, bypassing the single-user setup gate.
+    ///
+    /// `create_user` hard-gates on an empty user store — passkey setup is
+    /// single-user by design. Guests are additional login-capable principals
+    /// minted out-of-band from the shell plane, so they need an insert that does
+    /// not consult that gate. This is CLI-only and wired to no HTTP route: it
+    /// must never widen the internet-facing self-claim surface that `/setup`
+    /// guards.
+    ///
+    /// The handle becomes the user's username and is charset-restricted to ASCII
+    /// letters, digits, and hyphens (autonomy/o:635).
+    pub fn create_guest_user(&self, handle: &str) -> Result<StoredUser> {
+        validate_handle_charset(handle)?;
+
+        let user = StoredUser {
+            id: Uuid::new_v4(),
+            username: handle.to_string(),
+            created_at: Utc::now(),
+        };
+
+        {
+            let mut store = self.users.write().unwrap();
+            if store.users.values().any(|u| u.username == handle) {
+                anyhow::bail!("A user with handle '{}' already exists.", handle);
+            }
+            store.users.insert(user.id, user.clone());
+        }
+        self.save_users()?;
+
+        tracing::info!("Created guest user: {} ({})", user.username, user.id);
+        Ok(user)
     }
 
     // --- Passkey Management ---
@@ -297,6 +368,88 @@ impl Storage {
         }
     }
 
+    // --- API Key Management ---
+
+    /// Issue a new runtime API key bound to an optional actor uuid.
+    ///
+    /// Returns the raw key string ONCE; only its hash is persisted, so the raw
+    /// key cannot be recovered afterwards. The caller must deliver it securely.
+    pub fn issue_api_key(&self, actor_uuid: Option<Uuid>, name: &str) -> Result<String> {
+        let raw_key = generate_random_string(43);
+        self.insert_api_key(&raw_key, name, actor_uuid)?;
+        tracing::info!("Issued API key '{}' (actor: {:?})", name, actor_uuid);
+        Ok(raw_key)
+    }
+
+    /// Insert a new active key record for a known raw secret.
+    fn insert_api_key(&self, raw_key: &str, name: &str, actor_uuid: Option<Uuid>) -> Result<()> {
+        let key_hash = hash_token(raw_key);
+        let record = StoredApiKey {
+            key_hash: key_hash.clone(),
+            actor_uuid,
+            name: name.to_string(),
+            active: true,
+            created_at: Utc::now(),
+        };
+        {
+            let mut store = self.api_keys.write().unwrap();
+            store.keys.insert(key_hash, record);
+        }
+        self.save_api_keys()?;
+        Ok(())
+    }
+
+    /// Revoke a key by its name or its stored hash. Returns whether a matching
+    /// active key was revoked.
+    ///
+    /// Revocation takes effect on the next `/validate` with no restart: the
+    /// lookup path (`find_api_key_by_secret`) reloads keys from disk, so a revoke
+    /// performed by a separate CLI process is honored immediately by a running
+    /// server. This is the runtime-key-lifecycle guarantee.
+    pub fn revoke_api_key(&self, identifier: &str) -> Result<bool> {
+        // Reflect any keys issued/revoked by a concurrent CLI process first.
+        self.load_api_keys()?;
+        let revoked = {
+            let mut store = self.api_keys.write().unwrap();
+            let mut changed = false;
+            for key in store.keys.values_mut() {
+                if key.active && (key.name == identifier || key.key_hash == identifier) {
+                    key.active = false;
+                    changed = true;
+                }
+            }
+            changed
+        };
+        if revoked {
+            self.save_api_keys()?;
+            tracing::info!("Revoked API key '{}'", identifier);
+        }
+        Ok(revoked)
+    }
+
+    /// Look up an active stored key by its raw secret, comparing hashes in
+    /// constant time. Returns a clone of the matching active key, if any.
+    ///
+    /// Reloads keys from disk first: the CLI issue/revoke subcommands run as
+    /// separate processes, so the read path must consult disk rather than a
+    /// startup snapshot for a running server to honor them without a restart.
+    pub fn find_api_key_by_secret(&self, raw_key: &str) -> Option<StoredApiKey> {
+        let _ = self.load_api_keys();
+        let candidate_hash = hash_token(raw_key);
+        let store = self.api_keys.read().unwrap();
+        let mut matched: Option<StoredApiKey> = None;
+        for key in store.keys.values() {
+            // Constant-time compare guards the hash even though it is already a
+            // one-way digest of the secret — defense in depth on an auth
+            // boundary. Does not early-exit on a match, so timing does not leak
+            // which stored key (if any) matched.
+            if key.active && constant_time_eq(key.key_hash.as_bytes(), candidate_hash.as_bytes()) {
+                matched = Some(key.clone());
+            }
+        }
+        matched
+    }
+
     // --- WebAuthn Challenge Management (in-memory, short-lived) ---
 
     const CHALLENGE_TTL: Duration = Duration::from_secs(300); // 5 minutes
@@ -379,6 +532,10 @@ impl Storage {
         self.config_path.join("sessions.json")
     }
 
+    fn api_keys_path(&self) -> PathBuf {
+        self.config_path.join("api_keys.json")
+    }
+
     // --- User/Passkey/Session Persistence (with file locking) ---
 
     fn load_users(&self) -> Result<()> {
@@ -446,6 +603,25 @@ impl Storage {
         Ok(())
     }
 
+    fn load_api_keys(&self) -> Result<()> {
+        let path = self.api_keys_path();
+        if path.exists() {
+            let content = self.read_with_lock(&path)?;
+            let store: ApiKeyStore = serde_json::from_str(&content)?;
+            *self.api_keys.write().unwrap() = store;
+        }
+        // No logging here: this runs on every bearer lookup (see
+        // find_api_key_by_secret), so a per-call log line would be noise.
+        Ok(())
+    }
+
+    fn save_api_keys(&self) -> Result<()> {
+        let store = self.api_keys.read().unwrap();
+        let content = serde_json::to_string_pretty(&*store)?;
+        self.write_with_lock(&self.api_keys_path(), &content)?;
+        Ok(())
+    }
+
     /// Read file with exclusive lock
     fn read_with_lock(&self, path: &PathBuf) -> Result<String> {
         let file = File::open(path)?;
@@ -472,7 +648,11 @@ impl Storage {
         Ok(())
     }
 
-    /// Reset all users, passkeys, and sessions (for recovery)
+    /// Reset all users, passkeys, sessions, and API keys (for recovery).
+    ///
+    /// API keys are credentials too: leaving them behind after a reset would
+    /// let a key still authenticate against a store that no longer has its
+    /// principal, so recovery wipes them alongside users and sessions.
     pub fn reset_auth(&self) -> Result<()> {
         // Clear in-memory state
         {
@@ -487,13 +667,18 @@ impl Storage {
             let mut sessions = self.sessions.write().unwrap();
             sessions.sessions.clear();
         }
+        {
+            let mut api_keys = self.api_keys.write().unwrap();
+            api_keys.keys.clear();
+        }
 
         // Delete files
         let _ = std::fs::remove_file(self.users_path());
         let _ = std::fs::remove_file(self.passkeys_path());
         let _ = std::fs::remove_file(self.sessions_path());
+        let _ = std::fs::remove_file(self.api_keys_path());
 
-        tracing::info!("Reset all users, passkeys, and sessions");
+        tracing::info!("Reset all users, passkeys, sessions, and API keys");
         Ok(())
     }
 }
@@ -520,4 +705,37 @@ pub fn hash_token(token: &str) -> String {
     hasher.update(token.as_bytes());
     let result = hasher.finalize();
     base64::Engine::encode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, result)
+}
+
+/// Constant-time byte-slice equality. Returns false immediately on a length
+/// mismatch — length is not secret here, both operands are fixed-width hashes —
+/// but never short-circuits on content, so comparison time does not depend on
+/// how many leading bytes match.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff: u8 = 0;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
+/// Validate that a handle contains only ASCII letters, digits, and hyphens
+/// (autonomy/o:635). Rejects empty handles and any other character.
+fn validate_handle_charset(handle: &str) -> Result<()> {
+    if handle.is_empty() {
+        anyhow::bail!("Handle must not be empty");
+    }
+    if !handle
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-')
+    {
+        anyhow::bail!(
+            "Handle '{}' is invalid: only ASCII letters, digits, and hyphens are allowed",
+            handle
+        );
+    }
+    Ok(())
 }
