@@ -148,6 +148,10 @@ async fn main() -> anyhow::Result<()> {
         None => {}
     }
 
+    // Migrate config-file api keys into runtime storage, then authenticate
+    // solely from that hashed store (see validation::authenticate_bearer).
+    migrate_config_keys(&storage, &config)?;
+
     // Require public_url for server mode
     let public_url = cli
         .public_url
@@ -229,6 +233,21 @@ fn resolve_user(storage: &Storage, user: &str) -> Option<StoredUser> {
     } else {
         storage.find_user_by_username(user)
     }
+}
+
+/// Migrate config-file api keys into runtime storage (idempotent), so bearer
+/// auth reads exclusively from the hashed key store. Active keys are seeded
+/// preserving their exact string; inactive config keys are skipped (they never
+/// authenticated). Config keys carry no known actor uuid at the auth-service
+/// layer, so they migrate uuid-less and name-only — behavior identical to the
+/// old config path, but now hashed.
+fn migrate_config_keys(storage: &Storage, config: &Config) -> anyhow::Result<()> {
+    for api_key in &config.api_keys {
+        if api_key.active {
+            storage.seed_api_key(&api_key.key, &api_key.name, None)?;
+        }
+    }
+    Ok(())
 }
 
 async fn shutdown_signal() {

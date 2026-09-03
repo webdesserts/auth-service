@@ -116,9 +116,4 @@ impl Config {
             Ok(config)
         }
     }
-
-    /// Find the active API key matching the given key value, if any.
-    pub fn find_api_key(&self, key: &str) -> Option<&ApiKey> {
-        self.api_keys.iter().find(|k| k.active && k.key == key)
-    }
 }

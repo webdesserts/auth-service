@@ -111,24 +111,14 @@ fn authenticate_bearer(state: &AppState, headers: &HeaderMap) -> BearerAttempt {
     };
     let token = token.trim();
 
-    // Runtime storage keys (actor-bound, hashed, constant-time compare) win
-    // first: they can carry an actor uuid for X-Auth-Actor.
+    // All api keys — including the migrated config key — live in the hashed
+    // runtime store now (see migrate_config_keys). Constant-time compare; a
+    // stored key can carry an actor uuid for X-Auth-Actor.
     if let Some(stored) = state.storage.find_api_key_by_secret(token) {
         tracing::debug!("Request authenticated via storage API key {}", stored.name);
         return BearerAttempt::Success {
             identity: stored.name,
             actor_uuid: stored.actor_uuid,
-        };
-    }
-
-    // Legacy config-file api keys — read-once plaintext fallback, kept so the
-    // live config key keeps authenticating unchanged until it is migrated into
-    // runtime storage.
-    if let Some(api_key) = state.config.find_api_key(token) {
-        tracing::debug!("Request authenticated via config API key {}", api_key.name);
-        return BearerAttempt::Success {
-            identity: api_key.name.clone(),
-            actor_uuid: None,
         };
     }
 
@@ -233,6 +223,9 @@ mod tests {
     fn test_state(config: Config) -> (Arc<AppState>, TempDir) {
         let dir = TempDir::new().expect("create temp dir");
         let storage = Storage::new(dir.path().to_str().unwrap()).expect("create storage");
+        // Model the real startup sequence: config keys are migrated into the
+        // runtime store before the server serves any request.
+        crate::migrate_config_keys(&storage, &config).expect("migrate config keys");
         let state = Arc::new(AppState {
             config,
             storage,
@@ -491,9 +484,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn config_api_key_authenticates_via_legacy_fallback() {
-        // A config-file key (no storage key present) still authenticates via the
-        // legacy read-once fallback. Severing that fallback makes this go red.
+    async fn migrated_config_key_authenticates_via_storage() {
+        // The config key is migrated into the hashed store at startup, preserving
+        // its exact string, and authenticates via storage with the same identity
+        // and no actor. Severing the exact-string preservation in seed_api_key
+        // (hashing the wrong bytes) makes this go red.
         let config = Config {
             api_keys: vec![ApiKey {
                 key: "legacy-config-key".to_string(),

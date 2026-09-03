@@ -381,6 +381,29 @@ impl Storage {
         Ok(raw_key)
     }
 
+    /// Seed a key with a KNOWN raw secret (config-key migration), preserving the
+    /// exact string so an already-issued credential keeps authenticating.
+    ///
+    /// Idempotent: returns `false` without writing if a key with this secret's
+    /// hash is already stored, so repeated startups do not duplicate the key.
+    pub fn seed_api_key(
+        &self,
+        raw_key: &str,
+        name: &str,
+        actor_uuid: Option<Uuid>,
+    ) -> Result<bool> {
+        let key_hash = hash_token(raw_key);
+        {
+            let store = self.api_keys.read().unwrap();
+            if store.keys.contains_key(&key_hash) {
+                return Ok(false);
+            }
+        }
+        self.insert_api_key(raw_key, name, actor_uuid)?;
+        tracing::info!("Seeded config API key '{}' into runtime storage", name);
+        Ok(true)
+    }
+
     /// Insert a new active key record for a known raw secret.
     fn insert_api_key(&self, raw_key: &str, name: &str, actor_uuid: Option<Uuid>) -> Result<()> {
         let key_hash = hash_token(raw_key);

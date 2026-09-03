@@ -124,6 +124,7 @@ mod tests {
     fn test_state(config: Config) -> (Arc<AppState>, TempDir) {
         let dir = TempDir::new().expect("create temp dir");
         let storage = Storage::new(dir.path().to_str().unwrap()).expect("create storage");
+        crate::migrate_config_keys(&storage, &config).expect("migrate config keys");
         let state = Arc::new(AppState {
             config,
             storage,
