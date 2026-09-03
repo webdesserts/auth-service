@@ -762,3 +762,37 @@ fn validate_handle_charset(handle: &str) -> Result<()> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    fn temp_storage() -> (Storage, TempDir) {
+        let dir = TempDir::new().expect("temp dir");
+        let storage = Storage::new(dir.path().to_str().unwrap()).expect("storage");
+        (storage, dir)
+    }
+
+    #[test]
+    fn create_guest_accepts_valid_handle_charset() {
+        let (storage, _dir) = temp_storage();
+        let user = storage
+            .create_guest_user("rhea-01")
+            .expect("valid handle accepted");
+        assert_eq!(user.username, "rhea-01");
+    }
+
+    #[test]
+    fn create_guest_rejects_out_of_charset_handles() {
+        let (storage, _dir) = temp_storage();
+        // Underscore, space, non-ASCII, punctuation, and empty are all rejected
+        // (autonomy/o:635: letters, digits, hyphens only).
+        for bad in ["rhea_01", "rhea 01", "rhéa", "rhea!", ""] {
+            assert!(
+                storage.create_guest_user(bad).is_err(),
+                "handle {bad:?} should be rejected"
+            );
+        }
+    }
+}
