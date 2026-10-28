@@ -282,4 +282,40 @@ mod tests {
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
         assert!(!dir.path().join("sessions.json").exists());
     }
+
+    #[tokio::test]
+    async fn key_login_mints_shared_cookie_and_expires_host_only_variant() {
+        let mut config = Config::default();
+        config.session.cookie_domain = Some("umbra.computer".to_string());
+        let (state, _dir) = test_state(config);
+        let guest = state
+            .storage
+            .create_guest_user("guest")
+            .expect("create guest");
+        let raw_key = state
+            .storage
+            .issue_api_key(Some(guest.id), "guest-key")
+            .expect("issue key");
+        let response = login_key(
+            State(state),
+            HeaderMap::new(),
+            Json(KeyLoginRequest { key: raw_key }),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let cookies: Vec<_> = response
+            .headers()
+            .get_all(header::SET_COOKIE)
+            .iter()
+            .collect();
+        assert_eq!(cookies.len(), 2);
+        assert!(
+            cookies[0]
+                .to_str()
+                .unwrap()
+                .contains("Domain=umbra.computer")
+        );
+        assert!(!cookies[1].to_str().unwrap().contains("Domain="));
+        assert!(cookies[1].to_str().unwrap().contains("Max-Age=0"));
+    }
 }

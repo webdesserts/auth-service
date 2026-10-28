@@ -119,6 +119,7 @@ impl Config {
         if let Some(domain) = &self.session.cookie_domain {
             let domain = domain.trim().trim_start_matches('.').to_ascii_lowercase();
             if domain.is_empty()
+                || domain.ends_with('.')
                 || domain.contains(['/', ':', '\\'])
                 || domain.chars().any(|c| c.is_whitespace() || c.is_control())
             {
