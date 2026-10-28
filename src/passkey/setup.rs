@@ -5,13 +5,14 @@ use std::sync::Arc;
 use axum::{
     Json,
     extract::State,
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     response::{Html, IntoResponse},
 };
 use serde::{Deserialize, Serialize};
 use webauthn_rs::prelude::*;
 
 use crate::AppState;
+use crate::passkey::login::origin_allowed;
 use crate::storage::generate_random_string;
 
 use super::html;
@@ -40,8 +41,12 @@ pub struct StartRegistrationResponse {
 /// POST /setup/register/start - Start passkey registration
 pub async fn start_registration(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Json(req): Json<StartRegistrationRequest>,
 ) -> impl IntoResponse {
+    if !origin_allowed(&headers, &state, true) {
+        return (StatusCode::FORBIDDEN, "Invalid Origin").into_response();
+    }
     // Check if users already exist
     if state.storage.has_any_users() {
         return (
@@ -113,8 +118,12 @@ pub struct FinishRegistrationRequest {
 /// POST /setup/register/finish - Complete passkey registration
 pub async fn finish_registration(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Json(req): Json<FinishRegistrationRequest>,
 ) -> impl IntoResponse {
+    if !origin_allowed(&headers, &state, true) {
+        return (StatusCode::FORBIDDEN, "Invalid Origin").into_response();
+    }
     // Early exit if setup already complete (actual race protection is in create_user())
     if state.storage.has_any_users() {
         return (

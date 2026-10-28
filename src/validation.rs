@@ -221,6 +221,10 @@ mod tests {
     /// Build a real `AppState` backed by a scratch temp directory (dropped, and the
     /// directory removed, when the returned `TempDir` goes out of scope).
     fn test_state(config: Config) -> (Arc<AppState>, TempDir) {
+        test_state_at(config, "http://localhost:3001")
+    }
+
+    fn test_state_at(config: Config, public_url: &str) -> (Arc<AppState>, TempDir) {
         let dir = TempDir::new().expect("create temp dir");
         let storage = Storage::new(dir.path().to_str().unwrap()).expect("create storage");
         // Model the real startup sequence: config keys are migrated into the
@@ -229,7 +233,7 @@ mod tests {
         let state = Arc::new(AppState {
             config,
             storage,
-            public_url: "http://localhost:3001".to_string(),
+            public_url: public_url.to_string(),
             path_prefix: String::new(),
             webauthn: build_webauthn(),
         });
@@ -508,5 +512,166 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(response.headers().get("x-auth-user").unwrap(), "OpenCode");
         assert!(response.headers().get("x-auth-actor").is_none());
+    }
+
+    #[tokio::test]
+    async fn duplicate_session_cookie_values_try_all_and_accept_valid_one() {
+        let (state, _dir) = test_state(Config::default());
+        let user = state
+            .storage
+            .create_user("michael".to_string())
+            .expect("create user");
+        let token = state
+            .storage
+            .create_session(user.id, 3600)
+            .expect("create session");
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::COOKIE,
+            HeaderValue::from_str(&format!("auth_session=not-valid; auth_session={token}"))
+                .unwrap(),
+        );
+        let response = handler(State(state), headers).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers().get("x-auth-user").unwrap(), "michael");
+    }
+
+    #[test]
+    fn shared_cookie_has_domain_and_security_attributes() {
+        let cookie =
+            crate::passkey::login::build_session_cookie("token", 60, Some("umbra.computer"))
+                .to_string();
+        assert!(cookie.contains("auth_session=token"));
+        assert!(cookie.contains("Domain=umbra.computer"));
+        assert!(cookie.contains("Path=/"));
+        assert!(cookie.contains("HttpOnly"));
+        assert!(cookie.contains("Secure"));
+        assert!(cookie.contains("SameSite=Lax"));
+    }
+
+    #[test]
+    fn safe_return_url_allows_exact_hosts_and_rejects_tricks() {
+        let mut config = Config::default();
+        config.auth.return_hosts = vec![
+            "umbra.computer".to_string(),
+            "cache-reuse-utils.review.umbra.computer".to_string(),
+        ];
+        let (state, _dir) = test_state_at(config, "https://umbra.computer/auth");
+        let ok = crate::passkey::login::safe_return_to;
+        assert_eq!(
+            ok(&state, Some("https://umbra.computer/a?b=1")),
+            "https://umbra.computer/a?b=1"
+        );
+        assert_eq!(
+            ok(
+                &state,
+                Some("https://cache-reuse-utils.review.umbra.computer/x")
+            ),
+            "https://cache-reuse-utils.review.umbra.computer/x"
+        );
+        assert_eq!(
+            ok(&state, Some("/local/path?q=1")),
+            "https://umbra.computer/local/path?q=1"
+        );
+        for bad in [
+            "//evil.example/x",
+            "/\\evil.example/x",
+            "https://umbra.computer.evil/x",
+            "https://umbra.computer@evil.example/x",
+            "https://umbra.computer:444/x",
+            "http://umbra.computer/x",
+            "https://evil.example/x",
+            "https://umbra.computer\\@evil.example/x",
+            "https://umbra.computer/\ncontrol",
+        ] {
+            assert_eq!(ok(&state, Some(bad)), "/", "must reject {bad:?}");
+        }
+    }
+
+    #[test]
+    fn origin_must_be_central_when_present() {
+        let (state, _dir) = test_state_at(Config::default(), "https://umbra.computer/auth");
+        let allowed = crate::passkey::login::origin_allowed;
+        let mut central = HeaderMap::new();
+        central.insert(
+            header::ORIGIN,
+            HeaderValue::from_static("https://umbra.computer"),
+        );
+        assert!(allowed(&central, &state, true));
+        assert!(allowed(&central, &state, false));
+        let mut other = HeaderMap::new();
+        other.insert(
+            header::ORIGIN,
+            HeaderValue::from_static("https://cache-reuse-utils.review.umbra.computer"),
+        );
+        assert!(!allowed(&other, &state, true));
+        assert!(!allowed(&other, &state, false));
+        assert!(!allowed(&HeaderMap::new(), &state, true));
+        assert!(allowed(&HeaderMap::new(), &state, false));
+    }
+
+    #[tokio::test]
+    async fn logout_missing_origin_is_compatible_and_present_invalid_origin_is_rejected() {
+        let (state, _dir) = test_state_at(Config::default(), "https://umbra.computer/auth");
+        let mut headers = HeaderMap::new();
+        let response = crate::passkey::login::logout(State(state.clone()), headers.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        headers.insert(
+            header::ORIGIN,
+            HeaderValue::from_static("https://evil.example"),
+        );
+        let response = crate::passkey::login::logout(State(state), headers).await;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn shared_cookie_migration_expires_old_host_only_variant() {
+        let mut config = Config::default();
+        config.session.cookie_domain = Some("umbra.computer".to_string());
+        let (state, _dir) = test_state_at(config, "https://umbra.computer/auth");
+        let cookies = crate::passkey::login::session_cookies(&state, "token");
+        assert_eq!(cookies.len(), 2);
+        assert!(cookies[0].to_string().contains("Domain=umbra.computer"));
+        assert!(!cookies[1].to_string().contains("Domain="));
+        assert!(cookies[1].to_string().contains("Max-Age=0"));
+    }
+
+    #[tokio::test]
+    async fn logout_clears_both_variants_and_revokes_presented_session() {
+        let mut config = Config::default();
+        config.session.cookie_domain = Some("umbra.computer".to_string());
+        let (state, _dir) = test_state_at(config, "https://umbra.computer/auth");
+        let user = state
+            .storage
+            .create_user("michael".to_string())
+            .expect("create user");
+        let token = state
+            .storage
+            .create_session(user.id, 3600)
+            .expect("create session");
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::COOKIE,
+            HeaderValue::from_str(&format!("auth_session={token}")).unwrap(),
+        );
+        let response = crate::passkey::login::logout(State(state.clone()), headers).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get_all(header::SET_COOKIE)
+                .iter()
+                .count(),
+            2
+        );
+        assert!(state.storage.validate_session(&token).is_none());
+    }
+
+    #[test]
+    fn login_page_escapes_return_to_markup() {
+        let page =
+            crate::passkey::html::login_page("/auth", Some("https://umbra.computer/\"<script>"));
+        assert!(page.contains("&quot;&lt;script&gt;"));
+        assert!(!page.contains("value=\"https://umbra.computer/\"<script>"));
     }
 }

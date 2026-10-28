@@ -156,6 +156,7 @@ async fn main() -> anyhow::Result<()> {
     let public_url = cli
         .public_url
         .ok_or_else(|| anyhow::anyhow!("--public-url is required (or set AUTH_PUBLIC_URL)"))?;
+    config.validate(&public_url)?;
 
     // Initialize WebAuthn
     let webauthn = {

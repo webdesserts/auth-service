@@ -12,14 +12,14 @@ use std::sync::Arc;
 use axum::{
     Json,
     extract::State,
-    http::{StatusCode, header},
+    http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
 };
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::AppState;
-use crate::passkey::login::build_session_cookie;
+use crate::passkey::login::{origin_allowed, session_cookies, with_cookies};
 
 #[derive(Debug, Deserialize)]
 pub struct KeyLoginRequest {
@@ -49,8 +49,12 @@ pub struct KeyLoginResponse {
 /// (for browsers) and in the JSON body (for header-less scripted agents).
 pub async fn login_key(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Json(req): Json<KeyLoginRequest>,
 ) -> Response {
+    if !origin_allowed(&headers, &state, false) {
+        return (StatusCode::FORBIDDEN, "Invalid Origin").into_response();
+    }
     let Some(stored) = state.storage.find_api_key_by_secret(req.key.trim()) else {
         return (StatusCode::UNAUTHORIZED, "Invalid or revoked key").into_response();
     };
@@ -83,24 +87,23 @@ pub async fn login_key(
         }
     };
 
-    let cookie = build_session_cookie(&session_token, lifetime);
-
     tracing::info!(
         "Key login: minted session for {} ({})",
         user.username,
         user.id
     );
 
-    (
-        [(header::SET_COOKIE, cookie.to_string())],
+    let cookies = session_cookies(&state, &session_token);
+    with_cookies(
         Json(KeyLoginResponse {
             session_token,
             expires_in_secs: lifetime,
             user: user.username,
             actor_uuid,
-        }),
+        })
+        .into_response(),
+        cookies,
     )
-        .into_response()
 }
 
 #[cfg(test)]
@@ -156,6 +159,7 @@ mod tests {
 
         let response = login_key(
             State(state.clone()),
+            HeaderMap::new(),
             Json(KeyLoginRequest {
                 key: raw_key.clone(),
             }),
@@ -208,7 +212,12 @@ mod tests {
             .expect("issue key");
         assert!(state.storage.revoke_api_key("guest-key").expect("revoke"));
 
-        let response = login_key(State(state), Json(KeyLoginRequest { key: raw_key })).await;
+        let response = login_key(
+            State(state),
+            HeaderMap::new(),
+            Json(KeyLoginRequest { key: raw_key }),
+        )
+        .await;
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
         assert!(
             !dir.path().join("sessions.json").exists(),
@@ -227,7 +236,12 @@ mod tests {
             .issue_api_key(Some(orphan_uuid), "orphan-key")
             .expect("issue key");
 
-        let response = login_key(State(state), Json(KeyLoginRequest { key: raw_key })).await;
+        let response = login_key(
+            State(state),
+            HeaderMap::new(),
+            Json(KeyLoginRequest { key: raw_key }),
+        )
+        .await;
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
         assert!(
             !dir.path().join("sessions.json").exists(),
@@ -243,7 +257,12 @@ mod tests {
             .issue_api_key(None, "uuidless-key")
             .expect("issue key");
 
-        let response = login_key(State(state), Json(KeyLoginRequest { key: raw_key })).await;
+        let response = login_key(
+            State(state),
+            HeaderMap::new(),
+            Json(KeyLoginRequest { key: raw_key }),
+        )
+        .await;
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
         assert!(!dir.path().join("sessions.json").exists());
     }
@@ -254,6 +273,7 @@ mod tests {
 
         let response = login_key(
             State(state),
+            HeaderMap::new(),
             Json(KeyLoginRequest {
                 key: "no-such-key".to_string(),
             }),
