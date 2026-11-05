@@ -1,21 +1,15 @@
 [package]
 name = "auth-service"
-version.workspace = true
-edition.workspace = true
-authors.workspace = true
-license.workspace = true
-description = "API key authentication service for obsidian-memory"
+version = "0.1.0"
+edition = "2024"
+authors = ["Michael Mullins"]
+license = "Apache-2.0"
+repository = "https://github.com/webdesserts/auth-service"
+description = "Passkey and API key forward-auth service"
 
 [[bin]]
 name = "auth-service"
 path = "src/main.rs"
-
-# Under precise-builds, dist applies the workspace-global `features`
-# (`embedded-model`, `sync`) to every dist package individually. auth-service
-# has neither feature, so override to build it with no extra features.
-[package.metadata.dist]
-features = []
-default-features = true
 
 [dependencies]
 # Web framework
@@ -25,8 +19,8 @@ tower = "0.5"
 tower-http = { version = "0.6", features = ["cors", "trace"] }
 
 # Serialization
-serde.workspace = true
-serde_json.workspace = true
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
 
 # Crypto
 sha2 = "0.10"
@@ -56,9 +50,9 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # Utilities
-anyhow.workspace = true
+anyhow = "1.0"
 chrono = { version = "0.4", features = ["serde"] }
 url = "2"
 
 [dev-dependencies]
-tempfile.workspace = true
+tempfile = "3"
